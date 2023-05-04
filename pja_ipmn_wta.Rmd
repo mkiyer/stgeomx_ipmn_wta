@@ -1,0 +1,2357 @@
+---
+title: "pja_ipmn_wta"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{pja_ipmn2}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+
+library(stgeomx)
+
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(limma)
+library(factoextra)
+library(umap)
+library(fgsea)
+library(msigdbr)
+
+library(patchwork)
+library(ggrepel)
+library(ggridges)
+library(pheatmap)
+
+```
+
+## Input files and parameter settings
+
+```{r input files, include=FALSE}
+
+# master directory
+working_dir <- "/Users/mkiyer/Library/CloudStorage/OneDrive-DukeUniversity/research/projects/st_ipmn2"
+data_dir <- file.path(working_dir, "ext")
+
+# input directories
+geomx_dir <- file.path(working_dir, "geomx")
+
+# WTA PKC file
+wta_pkc_file <- file.path(geomx_dir, "Hs_R_NGS_WTA_v1.0.pkc")
+
+# Peter Allen Lab IPMN WTA dataset
+pja_ipmn_geomx_xlsx <- file.path(geomx_dir, "pja_ipmn2_wta_2022-12-02.xlsx")
+pja_ipmn_geomx_annot_xlsx <- file.path(geomx_dir, "pja_ipmn2_annotations_2023-04-13.xlsx")
+
+# Spatial Organ Atlas dataset
+soa_panc_geomx_xlsx <- file.path(geomx_dir, "soa_panc_2022-02-21.xlsx")
+soa_panc_geomx_annot_xlsx <- file.path(geomx_dir, "soa_panc_annotations_2023-04-11.xlsx")
+
+# GSE226829 (donor pancreata)
+donor_geomx_probes_xlsx <- file.path(geomx_dir, "GSE226829_PreQC_probes.xlsx")
+donor_geomx_counts_xlsx <- file.path(geomx_dir, "GSE226829_PreQC_raw_counts.xlsx")
+donor_geomx_samples_xlsx <- file.path(geomx_dir, "GSE226829_PreQC_segments_annotation_edited.xlsx")
+donor_geomx_dcc_tar <- file.path(geomx_dir, "GSE226829_RAW.tar")
+
+# GSE199102 (broad pdac)
+broad_pdac_geomx_samples_xlsx <- file.path(geomx_dir, "GSE199102_Broad_PDAC_WTA_annotations_edited.xlsx")
+broad_pdac_geomx_dcc_tar <- file.path(geomx_dir, "GSE199102_RAW.tar")
+
+# external resource files
+hpa_path_file <- file.path(data_dir, "hpa_pathology.tsv")
+cptac_panc_file <- file.path(data_dir, "cptac_panc_supp_mmc3.xlsx")
+
+# qc parameters
+geomx_negprobe_lod_quantile = 0.9
+geomx_min_counts = 50000
+geomx_min_auc = 0.60
+geomx_aoi_min_frac_expr = 0.2
+geomx_gene_min_frac_expr = 0.1
+
+# normalization
+norm_method = "qn"
+bgcorrect_method = "bgsub"
+bgcorrect_bw_adjust = 2
+bgcorrect_bg_quant = 0.5
+norm_method = "qn"
+
+# de parameters
+de_padj_cutoff <- 0.05
+de_log2fc_cutoff <- 1
+
+# gsea params
+gsea_padj_cutoff <- 0.05
+gsea_log2fc_cutoff <- 1
+
+# results
+results_dir <- file.path(working_dir, "results")
+plot_dir <- file.path(results_dir, "plots")
+gsea_plot_dir <- file.path(results_dir, "gsea_plots")
+
+for (d in c(results_dir, plot_dir, gsea_plot_dir)) {
+  if (!dir.exists(d)) {
+    dir.create(d)
+  }
+}
+
+```
+
+## Helper functions
+
+```{r helper functions, include=FALSE}
+
+get_color_scales <- function(patients) {
+  color_scales = list(
+    study = c(ipmn="#ffff00", donor="#ff00ff", soa_panc="#00ff00"),
+    path_aoi = c(nl="#0055ff", adm="#008800", panin="#88ff88", lgd="#00ffff",
+                 hgd="#ffff00", inv="#ffaa00", pdac="#ff0000"),
+    path_specimen = c(nl="#0000cc", ipmn_lgd="#00ffff", ipmn_inv="#ffaa00",
+                      pdac="#ff0000", pnet="#00ff00"),
+    path_patient = c(nl_nl="#4B0082", nl_adm="#008800", nl_panin="#00ff00", 
+             pdac_nl="#0000cc", pdac_adm ="#00aa00", 
+             pdac_panin ="#88ff88", pdac_pdac ="#ff0000",
+             ipmn_lgd_nl ="#0000ff", ipmn_lgd_lgd ="#008888",
+             ipmn_inv_nl ="#0044ff", ipmn_inv_lgd ="#00ffff",
+             ipmn_inv_hgd ="#ffff00", ipmn_inv_inv ="#ff5500",
+             pnet_nl = "#0088ff"),
+    path = c(nl_nl_epithelial="#4B0082", nl_adm_epithelial="#008800", nl_panin_epithelial="#00ff00", 
+             pdac_nl_epithelial="#0000cc", pdac_adm_epithelial="#00aa00", 
+             pdac_panin_epithelial="#88ff88", pdac_pdac_epithelial="#ff0000",
+             ipmn_lgd_nl_epithelial="#0000ff", ipmn_lgd_lgd_epithelial="#008888",
+             ipmn_inv_nl_epithelial="#0044ff", ipmn_inv_lgd_epithelial="#00ffff",
+             ipmn_inv_hgd_epithelial="#ffff00", ipmn_inv_inv_epithelial="#ff5500",
+             pnet_nl_epithelial="#0088ff"),
+    de_cptac_rna = c(no="#aaaaaa", dn="#00FFFF", up="#FFFF00", na="#FFFFFF"), 
+    de_cptac_prot = c(no="#aaaaaa", dn="#00FFFF", up="#FFFF00", na="#FFFFFF")
+  )
+  x <- pals::cols25(length(unique(patients)))
+  color_scales$patient = setNames(x, sort(unique(patients)))
+  return(color_scales)
+}
+
+# heatmap functions
+plot_pheatmap <- function(m, 
+                          annot_col, 
+                          annot_row, 
+                          annot_colors,
+                          filename, width, height,
+                          xmin=-6, xmax=6) {
+  pheatmap(m,
+           scale = "none",
+           color = colorRampPalette(c("navy", "white", "firebrick3"))(50),
+           breaks = seq(xmin, xmax, length.out=51),
+           annotation_col = annot_col,
+           annotation_row = annot_row,
+           annotation_colors = annot_colors,
+           border_color = NA,
+           cluster_rows = TRUE,
+           cluster_cols = TRUE,
+           clustering_distance_rows = "euclidean",
+           clustering_distance_cols = "euclidean",
+           clustering_method = "ward.D2",
+           fontsize_row = 6,
+           fontsize_col = 6,
+           filename = filename, 
+           width = width,
+           height = height)
+}
+
+save_pheatmap_pdf <- function(x, filename, width=7, height=7) {
+  stopifnot(!missing(x))
+  stopifnot(!missing(filename))
+  pdf(filename, width=width, height=height)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  dev.off()
+}
+
+plot_gene <- function(s, x, gene, aes_x, aes_color) {
+  exprs <- unlist(x[gene, ])
+  x <- s %>% add_column(gene = exprs)
+  p <- ggplot(x, aes(x={{ aes_x }}, y=gene, fill={{aes_color}})) +
+    geom_boxplot(outlier.shape = NA, width=0.75) +
+#    geom_violin(scale="width", width=0.5) +
+    geom_point(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.5)) +
+    ggtitle(paste0("Gene: ", gene)) +
+    theme_minimal() + 
+    theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
+    theme(axis.line = element_line(color = "black"))
+  return(p)
+}
+
+plot_gene2 <- function(s, x, gene, aes_x, aes_color) {
+  exprs <- unlist(x[gene, ])
+  x <- s %>% add_column(gene = exprs)
+  p <- ggplot(x, aes(x={{ aes_x }}, y=gene, fill={{aes_color}})) +
+    geom_boxplot(outlier.shape=NA, width=0.75) +
+    geom_point(position=position_jitterdodge(jitter.width=0.1), 
+               aes(group={{aes_color}}), pch=21) +
+    ggtitle(paste0("Gene: ", gene)) +
+    theme_bw() + 
+    theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
+    theme(axis.line = element_line(color = "black"))
+  return(p)
+}
+
+```
+
+## Read and process IPMN WTA geomx data
+
+```{r ipmn wta geomx data, include=FALSE}
+
+# read data
+ds <- st_geomx_read_xlsx(pja_ipmn_geomx_xlsx)
+# read and join sample annotation
+annot <- read_excel(pja_ipmn_geomx_annot_xlsx)
+ds$samples <- ds$samples %>% 
+  inner_join(annot, by="SegmentDisplayName")
+
+# subset epithelial segment
+s <- ds$samples %>% filter(segment == "panck")
+ds <- list(samples = s,
+           meta = ds$meta,
+           counts = ds$counts[, s$aoi])
+# name dataset
+ipmn_ds <- ds
+
+```
+
+## Read and process Spatial Organ Atlas pancreas geomx data
+
+```{r soa panc geomx data, include=FALSE}
+
+# read data
+ds <- st_geomx_read_xlsx(soa_panc_geomx_xlsx)
+# read and join sample annotation
+annot <- read_excel(soa_panc_geomx_annot_xlsx)
+ds$samples <- ds$samples %>% 
+  inner_join(annot, by="SegmentDisplayName")
+
+# subset epithelial segment
+s <- ds$samples %>% filter(segment == "panck+")
+ds <- list(samples = s,
+           meta = ds$meta,
+           counts = ds$counts[, s$aoi])
+# name dataset
+soa_panc_ds <- ds
+
+```
+
+## Read Donor Pancreas WTA Study
+
+```{r read wta pkc, include=FALSE}
+library(GeomxTools)
+
+st_geomx_read_pkc <- function(pkc_file) {
+  pkc <- yaml::read_yaml(pkc_file)
+  probes <- tibble(target = pkc$Targets)
+  probes <- probes %>% tidyr::unnest_wider(target) %>%
+    dplyr::rename(TargetName = DisplayName) %>%
+    tidyr::unnest_longer(Probes) %>%
+    tidyr::unnest_wider(Probes) %>%
+    dplyr::rename(ProbeDisplayName = DisplayName) %>%
+    dplyr::mutate(bg = startsWith(CodeClass, "Negative"))
+  return(probes)
+}
+
+st_geomx_read_dcc <- function(dcc_tar_file, dcc_dir) {
+  # cleanup
+  if (file.exists(dcc_dir)) {
+    unlink(dcc_dir, recursive = TRUE)
+  }
+  # extract dcc tar file
+  untar(dcc_tar_file, exdir=dcc_dir)
+  # read dcc files
+  dcc_files <- list.files(dcc_dir, full.names=TRUE)
+  dcc_data <- sapply(dcc_files, GeomxTools::readDccFile, simplify=FALSE)
+  dcc_data <- tibble(dcc = dcc_data) %>%
+    unnest_wider(dcc, simplify=FALSE)
+  
+  samples <- dcc_data %>% 
+    select(Header, Scan_Attributes, NGS_Processing_Attributes) %>%
+    unnest(cols = c(Header, Scan_Attributes, NGS_Processing_Attributes))
+  
+  counts <- dcc_data %>%
+    select(Scan_Attributes, Code_Summary) %>% 
+    hoist(Scan_Attributes, SampleID="SampleID") %>% 
+    select(-Scan_Attributes) %>%
+    unnest(Code_Summary) %>% 
+    pivot_wider(names_from=SampleID, values_from=Count, values_fill=1)
+  
+  # TODO: not sure whether to leave values at zero or 1
+  # TODO: could add one to all counts
+  # TODO: needs to be consistent with the way DSP server processes
+  # cleanup
+  if (file.exists(dcc_dir)) {
+    unlink(dcc_dir, recursive = TRUE)
+  }
+  return(list(samples=samples,
+              counts=counts))
+}
+
+# read pkc file
+probes <- st_geomx_read_pkc(wta_pkc_file)
+
+# extract dcc data from tar file
+dcc_dir <- file.path(working_dir, "dcc")
+ds <- st_geomx_read_dcc(donor_geomx_dcc_tar, dcc_dir)
+
+# read and join sample annotation
+samples <- read_excel(donor_geomx_samples_xlsx) %>%
+  inner_join(ds$samples, by=c("SampleID"="SampleID"))
+
+# join probes with counts
+counts <- left_join(probes, ds$counts, by="RTS_ID")
+
+# ensure all samples found in counts
+inds <- match(pull(samples, SampleID), colnames(counts))
+stopifnot(all(!is.na(inds)))
+
+# break counts into metadata and count data
+meta <- select(counts, rts=RTS_ID, probe=ProbeDisplayName, gene=TargetName, bg)
+
+# select valid samples
+counts <- select(counts, all_of(inds))
+# ensure samples and count tables are aligned
+stopifnot(all(pull(samples, SampleID) == colnames(counts)))
+
+# create new identifiers for slide, roi, segment, aoi
+slide_keys <- pull(samples, SlideName)
+samples$slide <- sprintf("s%02d", match(slide_keys, unique(slide_keys)))
+samples <- samples %>% mutate(
+  roi = sprintf("r%s", ROILabel),
+  segment = tolower(gsub(" ", "", SegmentLabel, fixed = TRUE)),
+  aoi = sprintf("%s_%s_%s", slide, roi, segment)
+)
+stopifnot(n_distinct(samples$aoi) == nrow(samples))
+
+# relabel columns of count matrix with new aoi id
+colnames(counts) <- samples$aoi
+stopifnot(all(samples$aoi == colnames(counts)))
+
+ds <- list(samples=samples,
+           meta=meta,
+           counts=counts)
+
+# subset epithelial segment
+s <- ds$samples %>% filter(segment == "panck")
+ds <- list(samples = s,
+           meta = ds$meta,
+           counts = ds$counts[, s$aoi])
+# name dataset
+donor_ds <- ds
+
+```
+
+## Read Broad PDAC study
+
+```{r read broad pdac, include=FALSE}
+library(GeomxTools)
+
+# TODO: there are errors with the probes in this study
+# for now, not usable
+
+# # read pkc file
+# pkc <- st_geomx_read_pkc(broad_pdac_geomx_pkc_file)
+# 
+# # extract dcc data from tar file
+# dcc_dir <- file.path(working_dir, "dcc")
+# ds <- st_geomx_read_dcc(broad_pdac_geomx_dcc_tar, dcc_dir)
+# 
+# # join probes with counts
+# counts <- left_join(probes, ds$counts, by="RTS_ID")
+# 
+# which(apply(counts, 1, function(x) { any(is.na(x)) }))
+# 
+# # read and join sample annotation
+# samples <- read_excel(broad_pdac_geomx_samples_xlsx) %>%
+#   inner_join(ds$samples, by=c("SampleID"="SampleID"))
+# # ensure all samples found in counts
+# inds <- match(pull(samples, SampleID), colnames(counts))
+# stopifnot(all(!is.na(inds)))
+# 
+# # break counts into metadata and count data
+# meta <- select(counts, rts=RTS_ID, probe=ProbeDisplayName, gene=TargetName, bg)
+# 
+# # select valid samples
+# counts <- select(counts, all_of(inds))
+# # ensure samples and count tables are aligned
+# stopifnot(all(pull(samples, SampleID) == colnames(counts)))
+# 
+# # create new identifiers for slide, roi, segment, aoi
+# slide_keys <- pull(samples, SlideName)
+# samples$slide <- sprintf("s%02d", match(slide_keys, unique(slide_keys)))
+# samples <- samples %>% mutate(
+#   roi = sprintf("r%s", ROI_number),
+#   segment = tolower(gsub(" ", "", SegmentLabel, fixed = TRUE)),
+#   aoi = sprintf("%s_%s_%s", slide, roi, segment)
+# )
+# stopifnot(n_distinct(samples$aoi) == nrow(samples))
+# 
+# # relabel columns of count matrix with new aoi id
+# colnames(counts) <- samples$aoi
+# stopifnot(all(samples$aoi == colnames(counts)))
+# 
+# ds <- list(samples=samples,
+#            meta=meta,
+#            counts=counts)
+# 
+# # subset epithelial segment
+# s <- ds$samples %>% filter(segment == "panck")
+# ds <- list(samples = s,
+#            meta = ds$meta,
+#            counts = ds$counts[, s$aoi])
+# 
+# # name dataset
+# broad_pdac_ds <- ds
+# 
+# ds <- broad_pdac_ds
+
+```
+
+## Merge GeoMx datasets
+
+```{r merge geomx datasets, include=FALSE}
+
+add_study_field <- function(ds, study) {
+  s <- ds$samples
+  s$study <- study
+  s <- s %>% mutate(patient = sprintf("%s_%s", study, patient),
+                    slide = sprintf("%s_%s", study, slide),
+                    roi = sprintf("%s_%s", study, roi),
+                    aoi = sprintf("%s_%s", study, aoi))
+  colnames(ds$counts) <- s$aoi
+  return(list(samples = s, meta = ds$meta, counts = ds$counts))
+}
+
+merge_ds <- function(a, b) {
+  # merge sample tables
+  sample_cols <- intersect(colnames(a$samples), colnames(b$samples))
+  s <- bind_rows(select(a$samples, all_of(sample_cols)),
+                 select(b$samples, all_of(sample_cols)))
+  # merge count data
+  a_counts <- bind_cols(select(a$meta, probe, gene, bg), a$counts)
+  b_counts <- bind_cols(select(b$meta, probe, gene, bg), b$counts)
+  counts <- inner_join(a_counts, b_counts, by=c("probe", "gene", "bg"),
+                       relationship="one-to-one")
+  # counts <- inner_join(a_counts, b_counts, by=c("probe", "gene", "bg"),
+  #                      suffix=c(paste0("_", a_study), paste0("_", b_study)),
+  #                      relationship="one-to-one")
+  
+  # break into metadata and count data
+  meta <- select(counts, -all_of(s$aoi))
+  counts <- select(counts, all_of(s$aoi))
+  # fraction expressed 
+  # meta <- mutate(meta, frac_expr = pmax(!!rlang::sym(paste0("frac_expr_", a_study)),
+  #                                       !!rlang::sym(paste0("frac_expr_", b_study))))
+  ds <- list(samples=s, meta=meta, counts=counts)
+  return(ds)
+}
+
+# merge datasets
+ds <- merge_ds(add_study_field(ipmn_ds, "ipmn"), 
+               add_study_field(soa_panc_ds, "soa_panc"))
+ds <- merge_ds(ds, add_study_field(donor_ds, "donor"))
+#ds <- merge_ds(ds, add_study_field(broad_pdac_ds, "broad_pdac"))
+
+# label study batches to account for batch effects
+ds$samples <- ds$samples %>%
+  mutate(batch = case_when(study == "donor" ~ paste0(study, "_", path_specimen),
+                           study == "ipmn" ~ "ipmn",
+                           study == "soa_panc" ~ "soa"))
+
+# process dataset
+ds <- st_geomx_preprocess(ds, geomx_negprobe_lod_quantile)
+ds <- st_geomx_merge_probes(ds)
+ds <- st_geomx_rm_empty_aois(ds)
+
+```
+
+## QC plots
+
+```{r qc plots}
+
+# patient vs ks_dist
+p <- ggplot(ds$samples, aes(patient, bg_ks_dist, fill=study)) +
+  geom_boxplot(outlier.shape = NA, width=0.75) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.5)) +
+  scale_fill_manual(values = pals::cols25()) +
+  theme_bw() +
+  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1))
+p
+f <- file.path(plot_dir, "qc_patient_bg_ks_dist_study.pdf")
+ggsave(f, plot=p, device="pdf", width = 8, height = 6)
+
+# study vs ks_dist (quality)
+p <- ggplot(ds$samples, aes(study, bg_ks_dist, fill=path)) +
+  geom_boxplot(outlier.shape = NA, width=0.75) +
+  geom_point(pch=21, position=position_jitterdodge(jitter.width = 0.1, dodge.width = 0.75)) +
+  scale_fill_manual(values = pals::cols25()) +
+  scale_color_manual(values = pals::cols25()) +
+  theme_bw() +
+  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1))
+p
+f <- file.path(plot_dir, "qc_study_bg_ks_dist_path.pdf")
+ggsave(f, plot=p, device="pdf", width = 8, height = 6)
+
+# study vs num_counts (quality)
+p <- ggplot(ds$samples, aes(study, num_counts, fill=path)) +
+  geom_boxplot(outlier.shape = NA, width=0.75) +
+  geom_point(pch=21, position=position_jitterdodge(jitter.width = 0.1, dodge.width = 0.75)) +
+  scale_y_log10() +
+  scale_fill_manual(values = pals::cols25()) +
+  scale_color_manual(values = pals::cols25()) +
+  theme_bw() +
+  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1))
+p
+f <- file.path(plot_dir, "qc_study_num_counts_path.pdf")
+ggsave(f, plot=p, device="pdf", width = 8, height = 6)
+
+
+# counts vs auc
+p <- ggplot(ds$samples, aes(num_counts, bg_auc)) +
+  geom_point(aes(color=study, shape=study)) +
+  scale_x_log10() +
+  scale_color_manual(values = pals::cols25()) +
+  theme_bw()
+p
+f <- file.path(plot_dir, "qc_scatter_num_counts_vs_auc_study.pdf")
+ggsave(f, plot=p, device="pdf", width = 8, height = 6)
+
+
+# figure: frac expressed cutoff
+p <- ggplot(ds$meta, aes(x=frac_expr)) +
+  geom_histogram(binwidth=0.05, color="black", fill="grey") +
+  geom_vline(xintercept=geomx_gene_min_frac_expr, linetype="dashed", color="red") +
+  theme_bw() +
+  xlab("Fraction Expressed Above Background") +
+  ylab("# of Probes") +
+  facet_wrap(~ bg, scales = "free_y")
+p
+f <- file.path(plot_dir, "histogram_frac_expr.pdf")
+ggsave(f, plot=p, device="pdf", width = 8, height = 4)
+
+```
+
+## QC filtering aois/genes
+
+```{r filtering}
+
+ds <- st_geomx_set_thresholds(ds, 
+                              min_counts = geomx_min_counts,
+                              min_auc = geomx_min_auc,
+                              aoi_min_frac_expr = geomx_aoi_min_frac_expr,
+                              gene_min_frac_expr = geomx_gene_min_frac_expr)
+
+# filter AOIs
+p <- st_geomx_plot_aoi_filter(ds, geomx_min_counts, geomx_min_auc, geomx_aoi_min_frac_expr)
+p
+ggsave(file.path(plot_dir, "qc_aoi_filter.pdf"), p)
+
+# filter genes
+p <- st_geomx_plot_gene_filter(ds, geomx_gene_min_frac_expr)
+p
+ggsave(file.path(plot_dir, "qc_gene_filtering_fpr_auc.pdf"), p)
+
+# apply filters
+fds <- list(samples = ds$samples,
+            meta = ds$meta,
+            counts = ds$counts)
+fds <- st_geomx_filter(fds)
+
+table(ds$samples$study, ds$samples$keep)
+nrow(ds$samples)
+nrow(fds$samples)
+table(ds$meta$keep)
+color_scales <- get_color_scales(fds$samples$patient)
+
+```
+
+## Normalization
+
+```{r norm}
+
+method <- "bgsub_qn"
+
+bgsub_ceiling <- function(x, offset=0, min.count=1) {
+  x <- ceiling(sweep(x, 2, offset, FUN="-"))
+  x <- apply(x, 2, pmax, min.count)
+  x
+}
+
+tbqnorm <- function(x) {
+  # convert to relative counts (counts-per-million)
+  xcpm <- apply(x, 2, function(x) { 1e6 * x / sum(x) })
+  # rank genes across samples by total relative expression
+  global_ranks <- rank(rowSums(xcpm), ties.method="random")
+  # use correlation to compute sample-sample similarity matrix
+  xcor <- cor(xcpm, method="spearman")
+  # exclude samples with negative correlation
+  xcor[xcor < 0] <- NA
+  # ordered list of nearest neighbors for each sample
+  nn_list <- apply(xcor, 2, order, na.last=NA, decreasing=TRUE)
+  # starting ranks (with ties present)
+  xrank_init <- as.data.frame(apply(x, 2, rank, ties.method="min"))
+  #xrank_init <- reframe(as_tibble(x), across(everything(), min_rank))
+  # reordering procedure to break ties for each sample
+  xrank <- matrix(nrow=nrow(x), ncol=ncol(x), dimnames=list(NULL, colnames(x)))
+  for(i in 1:ncol(x)) {
+    nn_ordered_cols <- xrank_init[, nn_list[,i]]
+    nn_ordered_cols <- bind_cols(nn_ordered_cols, tiebrk_ranks=global_ranks)
+    xrank[,i] <- do.call(order, unname(nn_ordered_cols))
+  }
+  # convert ordering to ranks
+  xrank <- apply(xrank, 2, order)
+
+  # compute quantiles
+  xquantiles <- apply(xcpm, 2, sort)
+  xquantiles <- apply(xquantiles, 1, geomean)
+  # renormalize quantiles such that columns sum to one million (e.g. cpm)
+  xquantiles <- 1e6 * (xquantiles / sum(xquantiles))
+  # apply quantile normalization procedure using new ranks
+  xnorm <- apply(xrank, 2, function(x) { xquantiles[x] })
+  return(xnorm)
+}
+
+# normalize genes
+x <- bgsub_ceiling(fds$counts, fds$samples$bg_geomean, min.count=0)
+#x <- st_geomx_normalize(x, method="q3")
+x <- tbqnorm(x)
+rownames(x) <- fds$meta$gene
+
+# filter genes that are zero
+keep_genes <- rowSums(x) > 0
+x <- x[keep_genes, ]
+fds <- list(
+  samples = fds$samples,
+  meta = filter(fds$meta, keep_genes),
+  counts = fds$counts[keep_genes, ],
+  bgmeta = fds$bgmeta,
+  bgcounts = fds$bgcounts
+)
+
+norm_cpm <- x
+log2_norm_cpm_raw <- log2(x+1)
+log2_norm_cpm <- log2_norm_cpm_raw
+# log2_norm_cpm <- limma::removeBatchEffect(log2_norm_cpm_raw, 
+#                                           batch = fds$samples$batch,
+#                                           design = model.matrix(~ path_aoi, data=fds$samples))
+
+```
+
+
+## Read external datasets
+
+```{r read external data}
+
+get_top_gene_sets <- function(tbl, log2fc_cutoff, padj_cutoff) {
+  ntopgenes <- c(20, 50, 100, 200, 500)
+  gs <- list()
+  for (a in unique(tbl$analysis)) {
+    up_genes <- tbl %>% filter(
+      analysis == a,
+      log2fc >= log2fc_cutoff,
+      fdr < padj_cutoff
+    )
+    dn_genes <- tbl %>% filter(
+      analysis == a,
+      log2fc <= -log2fc_cutoff,
+      fdr < padj_cutoff
+    )
+    gs_name <- paste0(toupper(a), "_ALL_UP")
+    gs[[gs_name]] <- pull(up_genes, gene_symbol)
+    gs_name <- paste0(toupper(a), "_ALL_DN")
+    gs[[gs_name]] <- pull(dn_genes, gene_symbol)
+
+    for (n in ntopgenes) {
+      x <- up_genes %>% slice_max(log2fc, n=n) %>% pull(gene_symbol)
+      if (length(x) < n) { next }
+      gs_name <- paste0(toupper(a), "_TOP", n, "_UP")
+      gs[[gs_name]] <- x
+      
+      x <- dn_genes %>% slice_min(log2fc, n=n) %>% pull(gene_symbol)
+      if (length(x) < n) { next }
+      gs_name <- paste0(toupper(a), "_TOP", n, "_DN")
+      gs[[gs_name]] <- x 
+    }
+  }
+  return(gs)
+}
+
+read_cptac_pdac_data <- function(filename, log2fc_cutoff, padj_cutoff) {
+  rna <- read_excel(filename, sheet="Diff_exp_RNA")
+  rna <- rna %>%
+    dplyr::rename(gene_symbol = GeneSymbol,
+                  log2fc = MedianLog2FoldChange,
+                  pval = `p value`,
+                  fdr = FDR) %>%
+    dplyr::mutate(analysis = "cptac_rna", 
+                  de = case_when(fdr > padj_cutoff ~ "no",
+                                 abs(log2fc) <= log2fc_cutoff ~ "no",
+                                 log2fc < -log2fc_cutoff ~ "dn",
+                                 log2fc > log2fc_cutoff ~ "up",
+                                 TRUE ~ "no"))
+  
+  # GeneSymbol	MedianLog2FoldChange	p value	FDR	
+  # MedianLog2FoldChange.duct	p value.duct	FDR.duct	
+  # Expression Coefficient	p value of adjusted expression	FDR of adjusted expression
+  # add additional data?
+  prot <- read_excel(cptac_panc_file, sheet="Diff_exp_prot")
+  prot <- prot %>%
+    dplyr::rename(
+      gene_symbol = GeneSymbol,
+      log2fc = MedianLog2FoldChange,
+      pval = `p value`,
+      fdr = FDR
+    ) %>%
+    select(gene_symbol, log2fc, pval, fdr) %>%
+    mutate(analysis = "cptac_prot",
+           de = case_when(fdr > padj_cutoff ~ "no",
+                          abs(log2fc) <= log2fc_cutoff ~ "no",
+                          log2fc < -log2fc_cutoff ~ "dn",
+                          log2fc > log2fc_cutoff ~ "up",
+                          TRUE ~ "no"))
+  return(bind_rows(rna, prot))
+}
+
+
+read_hpa_data <- function(hpa_path_file) {
+  x <- read.table(hpa_path_file, header=TRUE, sep="\t")
+  colnames(x) <- c("ens_gene_id", "gene_symbol", "cancer_type",
+                   "ihc_high", "ihc_medium", "ihc_low", "ihc_not_detected",
+                   "prog_fav", "unprog_fav", "prog_unfav", "unprog_unfav")
+  x <- as_tibble(x) %>%
+    distinct(gene_symbol, cancer_type, .keep_all=TRUE) %>%
+    mutate(cancer_type = str_replace(cancer_type, " ", "_")) %>%
+    mutate(prognostic = case_when(!is.na(prog_fav) ~ "fav",
+                                  !is.na(prog_unfav) ~ "unfav",
+                                  TRUE ~ "no")) %>%
+    select(ens_gene_id, gene_symbol, cancer_type, prognostic, prog_fav, prog_unfav)
+  return(x)
+}
+
+get_hpa_gene_sets <- function(hpa) {
+  gs = list()
+  for (catype in unique(hpa$cancer_type)) {
+    unfav <- filter(hpa, cancer_type == catype, prognostic == "unfav")  %>% select(gene_symbol) %>% pull()
+    fav <- filter(hpa, cancer_type == catype, prognostic == "fav")  %>% select(gene_symbol) %>% pull()
+    unfav_name <- paste0("HPA_", toupper(catype), "_UNFAV_PROGNOSIS")
+    fav_name <- paste0("HPA_",  toupper(catype), "_FAV_PROGNOSIS")
+    x <- setNames(list(unfav, fav), c(unfav_name, fav_name))
+    gs <- append(gs, x)
+  }
+  gs
+}
+
+# read cptac data
+cptac_de_data <- read_cptac_pdac_data(cptac_panc_file, gsea_log2fc_cutoff, gsea_padj_cutoff)
+cptac_de_data <- filter(cptac_de_data, gene_symbol %in% fds$meta$gene)
+# pivot to merge protein/rna data
+cptac_de_merged <- cptac_de_data %>%
+  pivot_wider(names_from = analysis, values_from = c(log2fc, pval, fdr, de))
+# get gene sets
+gs_cptac <- get_top_gene_sets(cptac_de_data, gsea_log2fc_cutoff, gsea_padj_cutoff)
+
+# read hpa data
+hpa <- read_hpa_data(hpa_path_file)
+hpa <- filter(hpa, gene_symbol %in% fds$meta$gene)
+hpa_pdac <- filter(hpa, cancer_type == "pancreatic_cancer")
+# get gene sets
+gs_hpa <- get_hpa_gene_sets(hpa)
+gs_hpa_panc <- gs_hpa[c("HPA_PANCREATIC_CANCER_UNFAV_PROGNOSIS", 
+                        "HPA_PANCREATIC_CANCER_FAV_PROGNOSIS")]
+
+# read msigdb data
+msigdb_gene_sets = msigdbr(species = "Homo sapiens")
+msigdb_gene_sets <- msigdb_gene_sets %>% 
+  filter(gene_symbol %in% fds$meta$gene) %>%
+  distinct(gs_name, gene_symbol, .keep_all = TRUE)
+
+# filter gruetzmann microarray dataset
+gruetzmann_gs_names <- c("GRUETZMANN_PANCREATIC_CANCER_UP",
+                         "GRUETZMANN_PANCREATIC_CANCER_DN")
+gruetzmann_gs <- msigdb_gene_sets %>%
+  filter(gs_name %in% gruetzmann_gs_names)
+gruetzmann_gs <- split(x = gruetzmann_gs$gene_symbol,
+                       f = gruetzmann_gs$gs_name)
+
+# PDAC enrichment gene sets
+# gs_pdac <- gs_cptac
+gs_pdac <- gruetzmann_gs
+gs_pdac <- append(gs_pdac, gs_hpa_panc)
+gs_pdac <- append(gs_pdac, gs_cptac)
+#lapply(gs_pdac, length)
+
+# discovery analysis across msigdb gene sets
+gs_hallmark <- filter(msigdb_gene_sets, gs_cat == "H")
+gs_hallmark <- split(x = gs_hallmark$gene_symbol, f = gs_hallmark$gs_name)
+gs_gobp <- filter(msigdb_gene_sets, gs_cat == "C5", gs_subcat == "GO:BP")
+gs_gobp <- split(x = gs_gobp$gene_symbol, f = gs_gobp$gs_name)
+
+```
+
+
+
+## Highly variable genes
+
+```{r highly variable genes, include=FALSE}
+
+most_var_genes <- function(x, ntop=500, span=0.50) {
+  tbl <- bind_cols(
+    u = rowMeans(x),
+    v = apply(x, 1, function(x) var(x))
+  )
+  lovar <- loess(v ~ u, data=tbl, span=span)
+  tbl$lovar <- predict(lovar)
+  tbl$vadj <- abs(tbl$v / tbl$lovar)
+  keep <- order(tbl$vadj, decreasing=TRUE)[seq_len(min(ntop, nrow(tbl)))]
+  return(x[keep,])
+}
+
+y <- log2_norm_cpm
+ntop <- 1000
+nlabel <- 100
+
+# plot most variable genes
+tbl <- bind_cols(
+  g = rownames(y),
+  u = rowMeans(y),
+  v = apply(y, 1, function(x) var(x))
+)
+lovar <- loess(v ~ u, data=tbl, span=1)
+tbl$lovar <- predict(lovar)
+tbl$vadj <- abs(tbl$v / tbl$lovar)
+tbl <- tbl %>% 
+  mutate(rank = min_rank(-vadj)) %>%
+  arrange(rank)
+label_data <- filter(tbl, rank <= nlabel)
+
+p <- ggplot(tbl) +
+  geom_point(aes(u, v), alpha=0.5, color="#ffaaaa") +
+  geom_line(aes(u, lovar), color="blue") +
+  geom_text_repel(data=label_data, aes(u, v, label=g), color="black", size=3, max.overlaps=Inf) +
+  theme_minimal()
+f <- file.path(plot_dir, paste0("maplot"))
+ggsave(paste0(f, ".pdf"), plot=p, width=10, height=10)
+ggsave(paste0(f, ".png"), plot=p, width=10, height=10)
+
+# select most variable genes
+y <- most_var_genes(log2_norm_expr_mat, ntop=ntop)
+
+
+s <- fds$samples %>% mutate(
+  noise_quantile = ntile(desc(bg_auc), 8)
+)
+
+annot_col <- column_to_rownames(s, "aoi") %>% 
+  select(study, patient, path_specimen, path_aoi, noise_quantile) %>%
+  as.data.frame()
+
+annot_col <- column_to_rownames(s, "library") %>% 
+  select(study, melanoma_subtype, intergenic, sj) %>%
+  as.data.frame()
+
+f <- file.path(plot_dir, "heatmap_cluster_highvar_genes")
+w <- 12
+h <- 12
+p <- pheatmap(y,
+         scale="row",
+         show_rownames=FALSE,
+         show_colnames=FALSE,
+         border_color=NA,
+         clustering_method = "average",
+         clustering_distance_rows = "correlation",
+         clustering_distance_cols = "correlation",
+         breaks = seq(-3, 3, 0.05),
+         color = colorRampPalette(c("purple3", "black", "yellow2"))(120),
+         annotation_col = annot_col,
+         annotation_colors = color_scales,
+         filename=paste0(f, ".png"), width=w, height=h)
+save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
+
+
+```
+
+
+## PCA
+
+```{r pca analysis}
+
+run_pca <- function(x) {
+  pca <- prcomp(t(x), center=TRUE, scale.=TRUE)
+  #pca <- prcomp(t(x))
+  pct_var <- round(100 * pca$sdev^2 / sum( pca$sdev^2 ), 2)
+  pct_var <- paste(colnames(pca$x), " (", paste(as.character(pct_var), "%", ")", sep=""), sep="")
+  return(list(pca = pca, pct_var = pct_var))
+}
+
+pca_plot <- function(pca_res, pca_tbl, color_by, shape_by) {
+  p <- ggplot(pca_tbl, aes(x=PC1, y=PC2, color={{color_by}}, shape={{shape_by}})) +
+    geom_point(alpha = 0.8, size=2) +
+    theme_bw() +
+    labs(x=pca_res$pct_var[1], y=pca_res$pct_var[2])
+  return(p)
+}
+
+pca_bg_fit <- function(x, response, npcs=5) {
+  # pca
+  pca_res <- prcomp(t(x), center=TRUE, scale=TRUE)
+  pct_var <- pca_res$sdev^2 / sum(pca_res$sdev^2)
+  tot_rsq <- 0
+  for (i in 1:npcs) {
+    tbl <- bind_cols(y = response, x = pca_res$x[,i])
+    model <- lm(y ~ x, data=tbl)
+    msum <- summary(model)
+    rsq <- msum$r.squared * pct_var[i]
+    tot_rsq <- tot_rsq + rsq
+  }
+  return(tot_rsq)
+}
+
+
+ntop <- 500
+nlabel <- 100
+
+y <- log2_norm_cpm
+
+pca_res <- run_pca(most_var_genes(y, ntop=ntop))
+#pca_res <- run_pca(y)
+pca_tbl <- bind_cols(fds$samples, as_tibble(pca_res$pca$x))
+
+width <- 10
+height <- 8
+
+# study
+p1 <- pca_plot(pca_res, pca_tbl, study, study) +
+  scale_color_manual(values = pals::cols25())
+f <- file.path(plot_dir, paste0("pca_", method, "_path_study.pdf"))
+ggsave(f, plot=p1, device="pdf", width=width, height=height)
+
+# bg_ks_dist
+p1 <- pca_plot(pca_res, pca_tbl, bg_ks_dist, path_specimen) +
+  scale_color_viridis_c()
+f <- file.path(plot_dir, paste0("pca_", method, "_bg_ks_dist.pdf"))
+ggsave(f, plot=p1, device="pdf", width=width, height=height)
+
+# patient
+p1 <- pca_plot(pca_res, pca_tbl, patient, path_specimen) +
+  scale_color_manual(values = color_scales$patient)
+f <- file.path(plot_dir, paste0("pca_", method, "_patient.pdf"))
+ggsave(f, plot=p1, device="pdf", width=width, height=height)
+
+# path
+p1 <- pca_plot(pca_res, pca_tbl, path, path_specimen) +
+  scale_color_manual(values = color_scales$path)
+f <- file.path(plot_dir, paste0("pca_", method, "_path.pdf"))
+ggsave(f, plot=p1, device="pdf", width=width, height=height)
+
+p1 <- pca_plot(pca_res, pca_tbl, path_specimen, path_specimen) +
+  scale_color_manual(values = color_scales$path_specimen)
+f <- file.path(plot_dir, paste0("pca_", method, "_path_specimen.pdf"))
+ggsave(f, plot=p1, device="pdf", width=width, height=height)
+
+p1 <- pca_plot(pca_res, pca_tbl, path_aoi, path_specimen) + 
+  scale_color_manual(values = color_scales$path_aoi)
+f <- file.path(plot_dir, paste0("pca_", method, "_path_aoi.pdf"))
+ggsave(f, plot=p1, device="pdf", width=width, height=height)
+
+
+# UMAP variable genes
+# x <- most_var_genes(y, ntop=ntop)
+# umap_fit <- t(x) %>% scale() %>% umap()
+# umap_df <- umap_fit$layout %>%
+#    as.data.frame() %>%
+#    dplyr::rename(umap1 = "V1", umap2 = "V2")
+# umap_df <- bind_cols(fds$samples, umap_df)
+# 
+# p <- ggplot(umap_df, aes(x=umap1, y=umap2, color=study)) +
+#   geom_point() +
+#   scale_color_manual(values = pals::cols25()) +
+#   theme_bw()
+# p
+# 
+# p <- ggplot(umap_df, aes(x=umap1, y=umap2, color=path, shape=path_specimen)) +
+#   geom_point() +
+#   scale_color_manual(values = color_scales$path) +
+#   theme_bw()
+# p
+# 
+# p1 <- ggplot(umap_df, aes(x=umap1, y=umap2)) + 
+#   geom_point(aes(color=bg_auc), alpha = 0.8, size=2) +
+#   scale_color_viridis_c()
+# p1
+
+```
+
+
+# DE analysis init
+```{r de analysis init, include=FALSE}
+
+# DE analysis 
+de <- NULL
+
+```
+
+## DE analysis donor study normal/panin specimens
+
+```{r de analysis panin}
+
+# select normal donor pancreas patients
+s <- fds$samples %>% filter(study == "donor", path_specimen == "nl")
+s$patient <- factor(s$patient)
+s$path_aoi <- factor(s$path_aoi, levels=c("nl", "adm", "panin"))
+
+design <- model.matrix(~0 + path_aoi + patient, s)
+contrasts <- makeContrasts(nladm_vs_nlnl = path_aoiadm - path_aoinl,
+                           nlpanin_vs_nlnl = path_aoipanin - path_aoinl,
+                           nlpanin_vs_nladm = path_aoipanin - path_aoiadm,
+                           levels=design)
+y <- log2_norm_cpm[, s$aoi]
+res <- run_limma_trend(y, design, contrasts, 
+                       padj_cutoff=de_padj_cutoff, 
+                       log2fc_cutoff=de_log2fc_cutoff)
+res <- res %>% mutate(method = method)
+de <- bind_rows(de, res)
+table(res$contrast, res$de)
+
+```
+
+## DE analysis donor study pdac specimens
+
+```{r de analysis pdac vs panin}
+
+# select pdac pancreas patients
+s <- fds$samples %>% filter(study == "donor", path_specimen == "pdac")
+table(s$path_specimen, s$path_aoi)
+s$patient <- factor(s$patient)
+s$path_aoi <- factor(s$path_aoi, levels=c("nl", "adm", "panin", "pdac"))
+
+design <- model.matrix(~0 + path_aoi + patient, s)
+contrasts <- makeContrasts(pdacpdac_vs_pdacnl = path_aoipdac - path_aoinl, 
+                           pdacpanin_vs_pdacnl = path_aoipanin - path_aoinl,
+                           pdacpdac_vs_pdacpanin = path_aoipdac - path_aoipanin,
+                           levels=design)
+y <- log2_norm_cpm[, s$aoi]
+res <- run_limma_trend(y, design, contrasts, 
+                       padj_cutoff=de_padj_cutoff, 
+                       log2fc_cutoff=de_log2fc_cutoff)
+res <- res %>% mutate(method = method)
+table(res$contrast, res$de)
+de <- bind_rows(de, res)
+
+```
+
+## DE analysis donor NL vs PDAC
+
+```{r de donor nl vs pdac specimens}
+
+# compare NL specimens vs specimens with PDAC
+s <- fds$samples %>% filter(study == "donor", path_aoi != "adm")
+s$patient <- factor(s$patient)
+s$path_aoi <- factor(s$path_aoi, levels=c("nl", "panin", "pdac"))
+s$path_specimen <- factor(s$path_specimen, levels=c("nl", "pdac"))
+s$path_patient <- paste0(s$path_specimen, "_", s$path_aoi)
+s$path_patient <- factor(s$path_patient, 
+                         levels=c("nl_nl", "nl_panin", "pdac_nl", "pdac_panin", "pdac_pdac"))
+levels(s$path_patient)
+table(s$path_patient)
+
+design <- model.matrix(~0 + path_patient, s)
+colnames(design) <- gsub("path_patient", "", colnames(design))
+colnames(design)
+contrasts <- makeContrasts(
+  pdacnl_vs_nlnl = pdac_nl - nl_nl,
+  pdacpanin_vs_nlpanin = pdac_panin - nl_panin,
+  levels=design
+)
+
+y <- log2_norm_cpm[, s$aoi]
+res <- run_limma_trend(y, design, contrasts, 
+                       padj_cutoff=de_padj_cutoff, 
+                       log2fc_cutoff=de_log2fc_cutoff)
+res <- res %>% mutate(method = method)
+table(res$contrast, res$de)
+de <- bind_rows(de, res)
+```
+
+
+## DE analysis INV specimens
+
+```{r de analysis inv specimens}
+
+# DE analysis of INV lesions
+s <- filter(fds$samples, study == "ipmn", path_specimen == "ipmn_inv")
+s$patient <- factor(s$patient)
+s$path_aoi <- factor(s$path_aoi, levels=c("nl", "lgd", "hgd", "inv"))
+
+design <- model.matrix(~0 + path_aoi + patient, s)
+contrasts <- makeContrasts(invinv_vs_invnl = path_aoiinv - path_aoinl,
+                           invhgd_vs_invnl = path_aoihgd - path_aoinl,
+                           invlgd_vs_invnl = path_aoilgd - path_aoinl,
+                           invinv_vs_invlgd = path_aoiinv - path_aoilgd,
+                           invhgd_vs_invlgd = path_aoihgd - path_aoilgd,
+                           invinv_vs_invhgd = path_aoiinv - path_aoihgd,
+                           levels=design)
+y <- log2_norm_cpm[, s$aoi]
+res <- run_limma_trend(y, design, contrasts, 
+                       padj_cutoff=de_padj_cutoff, 
+                       log2fc_cutoff=de_log2fc_cutoff)
+res <- res %>% mutate(method = method)
+table(res$contrast, res$de)
+de <- bind_rows(de, res)
+
+```
+
+## DE analysis LGD specimens
+
+```{r de analysis lgd specimens}
+
+# DE analysis of LGD lesions
+s <- filter(fds$samples, study == "ipmn", path_specimen == "ipmn_lgd")
+s$patient <- factor(s$patient)
+s$path_aoi <- factor(s$path_aoi, levels=c("nl", "lgd"))
+
+design <- model.matrix(~0 + path_aoi + patient, s)
+contrasts <- makeContrasts(lgdlgd_vs_lgdnl = path_aoilgd - path_aoinl,
+                           levels=design)
+y <- log2_norm_cpm[, s$aoi]
+res <- run_limma_trend(y, design, contrasts, 
+                       padj_cutoff=de_padj_cutoff, 
+                       log2fc_cutoff=de_log2fc_cutoff)
+res <- res %>% mutate(method = method)
+table(res$contrast, res$de)
+de <- bind_rows(de, res)
+
+```
+
+## DE analysis LGD vs INV specimens
+
+```{r de lgd vs inv specimens}
+
+# compare specimens with LGD vs specimens with INV
+s <- filter(fds$samples, study == "ipmn")
+s$patient <- factor(s$patient)
+s$path_aoi <- factor(s$path_aoi, levels=c("nl", "lgd", "hgd", "inv"))
+s$path_specimen <- factor(s$path_specimen, levels=c("ipmn_lgd", "ipmn_inv"))
+s$path_patient <- paste0(s$path_specimen, "_", s$path_aoi)
+s$path_patient <- factor(s$path_patient, 
+                         levels=c("ipmn_lgd_nl", "ipmn_lgd_lgd", 
+                                  "ipmn_inv_nl", "ipmn_inv_lgd", 
+                                  "ipmn_inv_hgd", "ipmn_inv_inv"))
+
+design <- model.matrix(~0 + path_patient, s)
+colnames(design) <- levels(s$path_patient)
+colnames(design)
+contrasts <- makeContrasts(
+  invinv_vs_lgdnl = ipmn_inv_inv - ipmn_lgd_nl,
+  invhgd_vs_lgdnl = ipmn_inv_hgd - ipmn_lgd_nl,
+  invlgd_vs_lgdnl = ipmn_inv_lgd - ipmn_lgd_nl,
+  invnl_vs_lgdnl = ipmn_inv_nl - ipmn_lgd_nl,
+  invinv_vs_lgdlgd = ipmn_inv_inv - ipmn_lgd_lgd,
+  invhgd_vs_lgdlgd = ipmn_inv_hgd - ipmn_lgd_lgd,
+  invlgd_vs_lgdlgd = ipmn_inv_lgd - ipmn_lgd_lgd,
+  levels=design
+)
+
+y <- log2_norm_cpm[, s$aoi]
+res <- run_limma_trend(y, design, contrasts, 
+                       padj_cutoff=de_padj_cutoff, 
+                       log2fc_cutoff=de_log2fc_cutoff)
+res <- res %>% mutate(method = method)
+table(res$contrast, res$de)
+de <- bind_rows(de, res)
+
+```
+
+```{r de write results}
+
+table(de$contrast)
+write_xlsx(de, file.path(working_dir, "de_path.xlsx"))
+
+```
+
+## DE Volcano plots
+```{r de volcano plots}
+
+# volcano plots
+for (mycontrast in unique(de$contrast)) {
+  x <- filter(de, contrast == mycontrast)
+  p <- plot_de_volcano(x) + 
+    labs(title="Volcano Plot", subtitle=mycontrast)
+  f <- paste0("volcano_de_", mycontrast, ".pdf")
+  ggsave(file.path(plot_dir, f), p, width=8, height=8)
+  f <- paste0("volcano_de_", mycontrast, ".png")
+  ggsave(file.path(plot_dir, f), p, width=8, height=8)
+}
+
+```
+
+## DE 2D scatter plots
+
+```{r de 2d scatter plots}
+
+plot_de_scatter2d <- function(tbl, xcontrast, ycontrast, nlabel=10, 
+                              highlight_genes=NULL) {
+  if (is.null(highlight_genes)) {
+    highlight_genes <- c()
+  }
+  xde <- sym(paste0("de_", xcontrast))
+  yde <- sym(paste0("de_", ycontrast))
+  xlog2fc <- sym(paste0("log2fc_", xcontrast))
+  ylog2fc <- sym(paste0("log2fc_", ycontrast))
+
+  x <- tbl %>% 
+    mutate(subtype = paste0("x", {{xde}}, "_", "y", {{yde}}),
+           log2fc_abs_x = case_when({{xde}} == "no" ~ 0,
+                                    TRUE ~ abs({{xlog2fc}})),
+           log2fc_abs_y = case_when({{yde}} == "no" ~ 0,
+                                    TRUE ~ abs({{ylog2fc}})),
+           log2fc_abs_max = pmax(log2fc_abs_x, log2fc_abs_y))
+  
+  color_scale = c(xno_yno = "#888888",
+                  xup_yup = "#FF0000",
+                  xdn_ydn = "#0000aa",
+                  xup_ydn = "#eeee00",
+                  xdn_yup = "#ff00ff",
+                  xup_yno = "#32cd32",
+                  xdn_yno = "#670092",
+                  xno_yup = "#ff6700",
+                  xno_ydn = "#16ccc4")
+  size_scale = c(xno_yno = 1, 
+                 xup_yup = 2,
+                 xdn_ydn = 2,
+                 xup_ydn = 2,
+                 xdn_yup = 2,
+                 xup_yno = 2,
+                 xdn_yno = 2,
+                 xno_yup = 2,
+                 xno_ydn = 2)
+  
+  annot_data <- filter(x, subtype != "xno_yno")
+  none_data <- filter(x, subtype == "xno_yno")
+  label_data <- annot_data %>% 
+    group_by(subtype) %>%
+    slice_max(log2fc_abs_max, n=nlabel) %>%
+    ungroup()
+  highlight_data <- filter(x, gene %in% highlight_genes)
+
+  p <- ggplot(x, aes(x={{xlog2fc}}, 
+                     y={{ylog2fc}},
+                     color=subtype, 
+                     size=subtype)) +
+    geom_point(data=none_data, alpha=0.4) + 
+    geom_point(data=annot_data, alpha=0.8) +
+    geom_text_repel(data=label_data, color="black", size=3, aes(label=gene), max.overlaps=Inf) + 
+    geom_point(data=highlight_data, pch=21, fill=NA, size=5, colour="#ffff00", stroke=1) + 
+    geom_point(data=highlight_data, pch=21, fill=NA, size=4, colour="#222222", stroke=1, alpha=0.5) +
+    geom_text_repel(data=highlight_data, color="black", size=3, aes(label=gene), max.overlaps=Inf) +     
+    scale_color_manual(values = color_scale) +
+    scale_size_manual(values = size_scale, guide = "none") + 
+    theme_minimal() +
+    xlab(as_string(xlog2fc)) +
+    ylab(as_string(ylog2fc)) +
+    labs(color = "DE Genes")
+  return(p)
+}
+
+
+# merge de analysis by gene
+de_merged <- de %>% select(gene, contrast, log2fc, padj, de) %>%
+  pivot_wider(names_from = contrast, values_from = c(log2fc, padj, de))
+nlabel <- 10
+width <- 8
+height <- 8
+
+#
+# Donor pancreata analysis
+# PanIN and ADM versus normal ducts
+#
+p <- plot_de_scatter2d(de_merged, "nlpanin_vs_nlnl", "nladm_vs_nlnl", nlabel) +
+  labs(title="Normal donor pancreata", 
+       subtitle="PanIN vs NL (x-axis) ADM vs NL (y-axis)")
+f <- file.path(plot_dir, "scatter2d_de_x_nlpanin_vs_nlnl_y_nladm_vs_nlnl")
+ggsave(paste0(f, ".pdf"), plot=p, width=width, height=height)
+ggsave(paste0(f, ".png"), plot=p, width=width, height=height)
+
+p <- plot_de_scatter2d(de_merged, "nlpanin_vs_nlnl", "nlpanin_vs_nladm", nlabel) +
+  labs(title="Normal donor pancreata", 
+       subtitle="PanIN vs NL (x-axis) PanIN vs ADM (y-axis)")
+f <- file.path(plot_dir, "scatter2d_de_x_nlpanin_vs_nlnl_y_nlpanin_vs_nladm")
+ggsave(paste0(f, ".pdf"), plot=p, width=width, height=height)
+ggsave(paste0(f, ".png"), plot=p, width=width, height=height)
+
+# highlight IPMN genes
+highlight_data <- de_merged %>% 
+  filter(de_lgdlgd_vs_lgdnl != "no") %>%
+  slice_max(abs(log2fc_lgdlgd_vs_lgdnl), n=50)
+p <- p + geom_point(data=highlight_data, pch=21, fill=NA, size=5, colour="#ffff00", stroke=1) +
+  geom_point(data=highlight_data, pch=21, fill=NA, size=4, colour="#222222", stroke=1)
+f <- file.path(plot_dir, "scatter2d_de_highlight_x_nlpanin_vs_nlnl_y_nlpanin_vs_nladm")
+ggsave(paste0(f, ".pdf"), plot=p, width=width, height=height)
+ggsave(paste0(f, ".png"), plot=p, width=width, height=height)
+
+
+#
+# PDAC specimens: PDAC and PanIN versus normal
+#
+p <- plot_de_scatter2d(de_merged, 
+                       xcontrast="pdacpdac_vs_pdacnl", 
+                       ycontrast="pdacpdac_vs_pdacpanin", 
+                       nlabel=nlabel) +
+  labs(title="PDAC Specimens", 
+       subtitle="PDAC vs NL (x-axis) PDAC vs PanIN (y-axis)")
+f <- file.path(plot_dir, "scatter2d_de_x_pdacpdac_vs_pdacnl_y_pdacpdac_vs_pdacpanin")
+ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
+ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
+
+# # highlight ipmn genes
+# highlight_genes <- de_merged %>% 
+#   filter(de_invinv_vs_invnl != "no") %>%
+#   slice_max(abs(log2fc_invinv_vs_invnl), n=20) %>%
+#   pull(gene)
+# 
+# p <- plot_de_scatter2d(de_merged, 
+#                        xcontrast="pdacpdac_vs_pdacnl", 
+#                        ycontrast="pdacpdac_vs_pdacpanin", 
+#                        nlabel=nlabel,
+#                        highlight_genes=highlight_genes) +
+#   labs(title="PDAC Specimens", 
+#        subtitle="PDAC vs NL (x-axis) PDAC vs PanIN (y-axis)")
+# f <- file.path(plot_dir, "scatter2d_de_highlight_x_pdacpdac_vs_pdacnl_y_pdacpdac_vs_pdacpanin")
+# ggsave(paste0(f, ".pdf"), plot=p, width=width, height=height)
+# ggsave(paste0(f, ".png"), plot=p, width=width, height=height)
+
+
+#
+# Comparison between PDAC and normal pancreas
+#
+p <- plot_de_scatter2d(de_merged, 
+                       xcontrast="pdacpanin_vs_nlpanin", 
+                       ycontrast="pdacnl_vs_nlnl", 
+                       nlabel=nlabel) +
+  labs(title="PDAC and Normal Specimens", 
+       subtitle="PDAC-PanIN vs Normal-PanIN (x-axis) PDAC-NL vs Normal-NL (y-axis)")
+f <- file.path(plot_dir, "scatter2d_de_x_pdacpanin_vs_nlpanin_y_pdacnl_vs_nlnl")
+ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
+ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
+
+
+#
+# IPMN INV Specimens
+#
+p <- plot_de_scatter2d(de_merged, 
+                       xcontrast="invinv_vs_invnl", 
+                       ycontrast="invinv_vs_invlgd", 
+                       nlabel=nlabel) +
+  labs(title="IPMN Specimens", 
+       subtitle="INV vs NL (x-axis) INV vs LGD (y-axis)")
+f <- file.path(plot_dir, "scatter2d_de_x_invinv_vs_invnl_y_invinv_vs_invlgd")
+ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
+ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
+
+
+p <- plot_de_scatter2d(de_merged, 
+                       xcontrast="invinv_vs_invnl", 
+                       ycontrast="invhgd_vs_invnl", 
+                       nlabel=nlabel) +
+  labs(title="IPMN INV Specimens", 
+       subtitle="INV-INV vs INV-NL (x-axis) INV-HGD vs INV-NL (y-axis)")
+f <- file.path(plot_dir, "scatter2d_de_x_invinv_vs_invnl_y_invhgd_vs_invnl")
+ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
+ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
+
+p <- plot_de_scatter2d(de_merged, 
+                       xcontrast="invinv_vs_invnl", 
+                       ycontrast="invinv_vs_invhgd", 
+                       nlabel=nlabel) +
+  labs(title="IPMN INV Specimens", 
+       subtitle="INV-INV vs INV-NL (x-axis) INV-INV vs INV-HGD (y-axis)")
+f <- file.path(plot_dir, "scatter2d_de_x_invinv_vs_invnl_y_invinv_vs_invhgd")
+ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
+ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
+
+p <- plot_de_scatter2d(de_merged, 
+                       xcontrast="invhgd_vs_invnl", 
+                       ycontrast="invlgd_vs_invnl", 
+                       nlabel=nlabel) +
+  labs(title="IPMN INV Specimens", 
+       subtitle="INV-HGD vs INV-NL (x-axis) INV-LGD vs INV-NL (y-axis)")
+f <- file.path(plot_dir, "scatter2d_de_x_invhgd_vs_invnl_y_invlgd_vs_invnl")
+ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
+ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
+
+
+
+#
+# IPMN: LGD vs NL in INV and LGD specimens
+#
+p <- plot_de_scatter2d(de_merged, 
+                       xcontrast="invlgd_vs_invnl", 
+                       ycontrast="lgdlgd_vs_lgdnl", 
+                       nlabel=nlabel) +
+  labs(title="IPMN: INV vs LGD Specimens", 
+       subtitle="INV-LGD vs INV-NL (x-axis) LGD-LGD vs LGD-NL (y-axis)")
+f <- file.path(plot_dir, "scatter2d_de_x_invlgd_vs_invnl_y_lgdlgd_vs_lgdnl")
+ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
+ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
+
+p <- plot_de_scatter2d(de_merged, 
+                       xcontrast="invlgd_vs_lgdnl", 
+                       ycontrast="invlgd_vs_lgdlgd", 
+                       nlabel=nlabel) +
+  labs(title="IPMN INV vs LGD specimens ", 
+       subtitle="INV-LGD vs LGD-NL (x-axis) INV-LGD vs LGD-LGD (y-axis)")
+f <- file.path(plot_dir, "scatter2d_de_x_invlgd_vs_lgdnl_y_invlgd_vs_lgdlgd")
+ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
+ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
+
+p <- plot_de_scatter2d(de_merged, 
+                       xcontrast="invlgd_vs_invnl", 
+                       ycontrast="invlgd_vs_lgdlgd", 
+                       nlabel=nlabel) +
+  labs(title="IPMN INV vs LGD specimens ", 
+       subtitle="INV-LGD vs INV-NL (x-axis) INV-LGD vs LGD-LGD (y-axis)")
+f <- file.path(plot_dir, "scatter2d_de_x_invlgd_vs_invnl_y_invlgd_vs_lgdlgd")
+ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
+ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
+
+
+
+#
+# IPMN vs PanIN
+#
+p <- plot_de_scatter2d(de_merged, 
+                       xcontrast="invinv_vs_invnl", 
+                       ycontrast="pdacpdac_vs_pdacnl", 
+                       nlabel=nlabel) +
+  labs(title="PDAC vs IPMN-INV", 
+       subtitle="INV-INV vs INV-NL (x-axis) PDAC-PDAC vs PDAC-NL (y-axis)")
+f <- file.path(plot_dir, "scatter2d_de_x_invinv_vs_invnl_y_pdacpdac_vs_pdacnl")
+ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
+ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
+
+p <- plot_de_scatter2d(de_merged, 
+                       xcontrast="invlgd_vs_invnl", 
+                       ycontrast="pdacpanin_vs_pdacnl", 
+                       nlabel=nlabel) +
+  labs(title="IPMN vs PanIN (INV and PDAC specimens)", 
+       subtitle="INV-LGD vs INV-NL (x-axis) PDAC-PanIN vs PDAC-NL (y-axis)")
+f <- file.path(plot_dir, "scatter2d_de_x_invlgd_vs_invnl_y_pdacpanin_vs_pdacnl")
+ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
+ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
+
+p <- plot_de_scatter2d(de_merged, 
+                       xcontrast="lgdlgd_vs_lgdnl", 
+                       ycontrast="nlpanin_vs_nlnl", 
+                       nlabel=nlabel) +
+  labs(title="IPMN vs PanIN in (LGD and NL specimens)", 
+       subtitle="LGD-LGD vs LGD-NL (x-axis) NL-PanIN vs NL-NL (y-axis)")
+f <- file.path(plot_dir, "scatter2d_de_x_lgdlgd_vs_lgdnl_y_nlpanin_vs_nlnl")
+ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
+ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
+
+
+```
+
+
+## DE heatmaps
+
+
+```{r de heatmaps, include=FALSE}
+
+# setup heatmap annotations
+gene_annot <- fds$meta %>%
+  left_join(cptac_de_merged, by=c("gene"="gene_symbol")) %>%
+  mutate(de_cptac_rna = replace_na(de_cptac_rna, "na"),
+         de_cptac_prot = replace_na(de_cptac_prot, "na"))
+annot_row <- gene_annot %>%
+  select(gene, de_cptac_rna, de_cptac_prot) %>%
+  column_to_rownames("gene") %>%
+  as.data.frame()
+annot_col <- column_to_rownames(fds$samples, "aoi") %>% 
+  select(study, patient, path_aoi, path_specimen) %>%
+  as.data.frame()
+
+
+#
+# PanIN vs IPMN in LGD tissues
+#
+# de gene params
+padj_cutoff <- 1e-5
+log2fc_cutoff <- 3
+ntop <- 50
+contrasts <- c("nlpanin_vs_nlnl", "lgdlgd_vs_lgdnl")
+path_types <- c("nl_nl_epithelial", "nl_panin_epithelial",
+                "ipmn_lgd_nl_epithelial", "ipmn_lgd_lgd_epithelial")
+
+g <- filter(de, contrast %in% contrasts,
+            abs(log2fc) > log2fc_cutoff, 
+            padj < padj_cutoff) %>%
+  group_by(contrast, de) %>%
+  slice_max(abs(log2fc), n=ntop) %>%
+  ungroup() %>%
+  distinct(gene) %>% 
+  pull(gene)
+ngenes <- length(g)
+
+# standardize gene expression
+s <- fds$samples %>% filter(path %in% path_types)
+snl <- fds$samples %>% filter(path %in% c("nl_nl_epithelial", "ipmn_lgd_nl_epithelial"))
+
+x <- log2_norm_cpm[g, s$aoi]
+u <- apply(x[, snl$aoi], 1, median)
+x <- sweep(x, 1, u, FUN="-")
+v <- pmax(apply(x[, snl$aoi], 1, sd), 1)
+x <- sweep(x, 1, v, FUN="/")
+xmin <- -4
+xmax <- 4
+
+# heatmap
+f <- file.path(plot_dir,  paste0("heatmap_de_panin_vs_ipmn_", ngenes, "_genes"))
+h <- round(3 + (length(g) / 10))
+w <- 10
+p <- plot_pheatmap(x, 
+                   annot_col[s$aoi,], 
+                   annot_row[g,], 
+                   annot_colors=color_scales,
+                   filename=paste0(f, ".png"), 
+                   width=w, height=h,
+                   xmin=xmin, xmax=xmax)
+save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
+
+
+#
+# PanIN vs IPMN in LGD and INV/PDAC tissues
+#
+# de gene params
+padj_cutoff <- 1e-5
+log2fc_cutoff <- 4
+ntop <- 50
+contrasts <- c("pdacpanin_vs_pdacnl",
+               "invlgd_vs_invnl", 
+               "nlpanin_vs_nlnl", 
+               "lgdlgd_vs_lgdnl")
+path_types <- c("nl_nl_epithelial", 
+                "nl_panin_epithelial",
+                "ipmn_lgd_nl_epithelial", 
+                "ipmn_lgd_lgd_epithelial",
+                "pdac_panin_epithelial",
+                "pdac_nl_epithelial",
+                "pnet_nl_epithelial",
+                "ipmn_inv_lgd_epithelial",
+                "ipmn_inv_nl_epithelial")
+nl_types <- c("nl_nl_epithelial", 
+              "ipmn_lgd_nl_epithelial", 
+              "pdac_nl_epithelial",
+              "ipmn_inv_nl_epithelial",
+              "pnet_nl_epithelial")
+
+g <- filter(de, contrast %in% contrasts,
+            abs(log2fc) > log2fc_cutoff, 
+            padj < padj_cutoff) %>%
+  group_by(contrast, de) %>%
+  slice_max(abs(log2fc), n=ntop) %>%
+  ungroup() %>%
+  distinct(gene) %>% 
+  pull(gene)
+ngenes <- length(g)
+
+# standardize gene expression
+s <- fds$samples %>% filter(path %in% path_types)
+snl <- fds$samples %>% filter(path %in% nl_types)
+x <- log2_norm_cpm[g, s$aoi]
+u <- apply(x[, snl$aoi], 1, median)
+x <- sweep(x, 1, u, FUN="-")
+v <- pmax(apply(x[, snl$aoi], 1, sd), 1)
+x <- sweep(x, 1, v, FUN="/")
+xmin <- -4
+xmax <- 4
+
+# heatmap
+f <- file.path(plot_dir,  paste0("heatmap_de_pdac_panin_vs_ipmn_", ngenes, "_genes"))
+h <- round(3 + (length(g) / 10))
+w <- 10
+p <- plot_pheatmap(x, 
+                   annot_col[s$aoi,], 
+                   annot_row[g,], 
+                   annot_colors=color_scales,
+                   filename=paste0(f, ".png"), 
+                   width=w, height=h,
+                   xmin=xmin, xmax=xmax)
+save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
+
+
+
+
+#
+# Full IPMN Dataset
+#
+padj_cutoff <- 1e-4
+log2fc_cutoff <- 3
+ntop <- 250
+contrasts <- c("invhgd_vs_invlgd",
+               "invhgd_vs_invnl", 
+               "invinv_vs_invhgd", 
+               "invinv_vs_invlgd",
+               "invinv_vs_invnl",
+               "invlgd_vs_invnl",
+               "lgdlgd_vs_lgdnl")
+
+nl_types <- c("ipmn_lgd_nl_epithelial",
+              "ipmn_inv_nl_epithelial",
+              "ipmn_lgd_lgd_epithelial",
+              "ipmn_inv_lgd_epithelial")
+
+g <- filter(de, contrast %in% contrasts,
+            abs(log2fc) > log2fc_cutoff, 
+            padj < padj_cutoff) %>%
+  group_by(contrast, de) %>%
+  slice_max(abs(log2fc), n=ntop) %>%
+  ungroup() %>%
+  distinct(gene) %>% 
+  pull(gene)
+ngenes <- length(g)
+
+# standardize gene expression
+s <- fds$samples %>% filter(study == "ipmn")
+snl <- fds$samples %>% filter(path %in% nl_types)
+
+x <- log2_norm_cpm[g, s$aoi]
+x <- t(scale(t(x)))
+xmin <- -2
+xmax <- 2
+
+# heatmap
+f <- file.path(plot_dir,  paste0("heatmap_de_ipmn_", ngenes, "_genes"))
+h <- round(3 + (length(g) / 10))
+w <- 10
+
+p <- plot_pheatmap(x,
+                   annot_col[s$aoi,],
+                   annot_row[g,],
+                   annot_colors=color_scales,
+                   filename=paste0(f, ".png"),
+                   width=w, height=h,
+                   xmin=xmin, xmax=xmax)
+save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
+
+
+#
+# Entire dataset
+# 
+padj_cutoff <- 1e-3
+log2fc_cutoff <- 3
+ntop <- 10
+
+g <- filter(de, abs(log2fc) > log2fc_cutoff, 
+            padj < padj_cutoff) %>%
+  group_by(contrast, de) %>%
+  slice_max(abs(log2fc), n=ntop) %>%
+  ungroup() %>%
+  distinct(gene) %>% 
+  pull(gene)
+ngenes <- length(g)
+
+# standardize gene expression
+s <- fds$samples
+x <- log2_norm_cpm[g, s$aoi]
+x <- t(scale(t(x)))
+xmin <- -2
+xmax <- 2
+
+# heatmap
+f <- file.path(plot_dir,  paste0("heatmap_de_all_", ngenes, "_genes"))
+h <- round(3 + (length(g) / 10))
+w <- 10
+
+p <- plot_pheatmap(x,
+                   annot_col[s$aoi,],
+                   annot_row[g,],
+                   annot_colors=color_scales,
+                   filename=paste0(f, ".png"),
+                   width=w, height=h,
+                   xmin=xmin, xmax=xmax)
+save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
+
+```
+
+
+## GSEA
+
+```{r gsea, include=FALSE}
+
+get_de_ranks <- function(de, a) {
+  ranks <- de %>% 
+    filter(contrast == a) %>%
+    select(gene, log2fc, padj) %>%
+    mutate(rank = log2fc)
+  ranks = sort(setNames(ranks$rank, ranks$gene), decreasing = TRUE)
+  return(ranks)
+}
+
+plot_gsea_enrichment <- function(x, ranks, a, gs) {
+  txt_stat <- paste0("ES=", round(x$ES,2), " NES=", round(x$NES, 2), " padj=", format(x$padj, scientific=TRUE, digits=3))
+  txt_title <- paste0("ranks: ", a, " gs: ", x$pathway)
+  p <- plotEnrichment(gs[[x$pathway]], ranks) +
+    annotate(geom="text", x=150, y=0.1, label=txt_stat, hjust=0) +
+    labs(title = txt_title, 
+         xlab = "Rank",
+         ylab = "Enrichment Score") +
+    theme(plot.title = element_text(size=8))
+  return(p)
+}
+
+run_batch_fgsea <- function(my_analyses, my_de, my_gs, my_prefix, 
+                            my_plot_dir, 
+                            my_padj_cutoff=0.01,
+                            do_plots=TRUE) {
+  gsea <- NULL
+  for (a in my_analyses) {
+    ranks <- get_de_ranks(my_de, a)
+    res <- fgsea(pathways = my_gs, stats = ranks, minSize = 10, eps = 0, nPermSimple = 10000)
+    res <- mutate(res, analysis = a)
+    gsea <- bind_rows(gsea, res)
+    print(a)
+    if (do_plots) {
+      for (i in 1:nrow(res)) {
+        x <- res[i,]
+        if (x$padj >= my_padj_cutoff) { next }
+        print(x$pathway)
+        p <- plot_gsea_enrichment(x, ranks, a, my_gs)
+        f <- file.path(my_plot_dir, paste0(my_prefix, "_", a, "_gs_", x$pathway, ".pdf"))
+        ggsave(f, plot=p, device="pdf", width=5, height=3)
+      }
+    }
+  }
+  return(gsea)
+}
+
+gmt_to_tbl <- function(gmt) {
+  gs_to_tbl <- function(gs_name, gs_genes) {
+    bind_cols(gs_name = rep(gs_name, length(gs_genes)),
+              gene_symbol = gs_genes)
+  }
+  tbl <- NULL
+  for (i in 1:length(gmt)) {
+    tbl <- bind_rows(tbl, gs_to_tbl(names(gmt)[i], gmt[[i]]))
+  }
+  return(tbl)
+}
+
+plot_gsea_volcano <- function(x, padj_cutoff = 0.01, max.overlaps = Inf) {
+  p <- ggplot(x, aes(x=NES, y=-log10(padj), color=analysis)) + 
+    geom_point(data=subset(x, padj > padj_cutoff), size=1, alpha=0.4) + 
+    geom_point(data=subset(x, padj <= padj_cutoff), size=2, alpha=0.8) +
+    geom_text_repel(data=subset(x, padj <= padj_cutoff), color="black", size=3, aes(label=pathway), max.overlaps=max.overlaps) +
+    ylab("-log10(adjusted p-value)") +
+    xlab("NES") +
+    theme_minimal() +
+    theme(legend.position="bottom") + 
+    theme(axis.line = element_line(color = "black")) +
+    coord_flip() 
+  return(p)
+}
+
+plot_gsea_barplot <- function(x, padj_cutoff = 0.01) {
+  x <- mutate(x, sig = ifelse(padj < padj_cutoff, ifelse(NES < 0, "dn", "up"), "no"),
+              neglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA))
+  p <- ggplot(x, aes(x=reorder(pathway, NES), y=NES, fill=neglog10padj)) +
+    geom_col() +
+    scale_fill_gradient(low = "blue", high = "cyan", na.value="#aaaaaa") +
+    coord_flip() +
+    labs(x="Analysis", y="Normalized Enrichment Score") +
+    theme_minimal()
+  return(p)
+}
+
+gsea_leading_edge_matrix <- function(x, my_padj_cutoff) {
+  # filter for significant results
+  sig_pathways <- x %>%
+    filter(padj < my_padj_cutoff) %>% select(pathway) %>% distinct() %>% pull()
+  x <- x %>%
+    filter(pathway %in% sig_pathways) %>%
+    arrange(desc(NES))
+  
+  # get leading edge genes
+  leading_edge_genes <- summarise(x, result = unlist(leadingEdge, use.names=FALSE)) %>% distinct() %>% pull()
+  
+  # matrix genes (rows) vs pathways (columns)
+  m <- matrix(data = 0, nrow=length(leading_edge_genes), ncol=nrow(x))
+  m <- as.data.frame(m)
+  rownames(m) <- leading_edge_genes
+  colnames(m) <- x$pathway
+  for (i in 1:nrow(x)) {
+    p <- x$pathway[i]
+    nes <- x$NES[i]
+    padj <- x$padj[i]
+    for (j in x$leadingEdge[i]) {
+      m[j, p] <- sign(nes)
+    }
+  }
+  # filter genes only found in a single pathway
+  m <- m[abs(rowSums(m)) >= 2, ]
+  # filter empty columns
+  m <- m[, abs(colSums(m)) > 1]
+  # order by number of pathways sharing the gene
+  m <- m[order(rowSums(m), decreasing=TRUE),]
+  m <- m[,order(colSums(m), decreasing=TRUE)]
+  return(m)
+}
+
+
+#
+# Setup analysis
+#
+table(de$contrast)
+analyses <- unique(de$contrast)
+
+#
+# CPTAC GSEA
+#
+prefix <- "gsea_cptac"
+padj_cutoff <- 0.01
+gs <- gs_pdac[c("CPTAC_RNA_ALL_UP", "CPTAC_RNA_ALL_DN")]
+gsea <- run_batch_fgsea(analyses, de, gs, prefix, gsea_plot_dir, padj_cutoff)
+gsea_cptac <- as_tibble(gsea)
+
+# write gsea results
+f <- file.path(working_dir, paste0(prefix, "_results.tsv"))
+data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
+f <- file.path(working_dir, paste0(prefix, "_results.xlsx"))
+write_xlsx(gsea, f)
+
+#
+# PDAC GSEA
+#
+prefix <- "gsea_pdac"
+padj_cutoff <- 0.01
+gs <- gs_pdac[c("CPTAC_RNA_ALL_UP", "CPTAC_RNA_ALL_DN",
+                "HPA_PANCREATIC_CANCER_UNFAV_PROGNOSIS",
+                "HPA_PANCREATIC_CANCER_FAV_PROGNOSIS")]
+gsea <- run_batch_fgsea(analyses, de, gs, prefix, gsea_plot_dir, padj_cutoff)
+gsea_pdac <- as_tibble(gsea)
+# write gsea results
+f <- file.path(working_dir, paste0(prefix, "_results.tsv"))
+data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
+f <- file.path(working_dir, paste0(prefix, "_results.xlsx"))
+write_xlsx(gsea, f)
+
+
+#
+# Hallmark gene set analysis
+#
+prefix <- "gsea_hallmark"
+padj_cutoff <- 0.01
+gsea <- run_batch_fgsea(analyses, de, gs_hallmark, prefix, gsea_plot_dir, 
+                        padj_cutoff)
+gsea_hallmark <- as_tibble(gsea) %>%
+  left_join(select(msigdb_gene_sets, gs_cat, gs_subcat, gs_name) %>% distinct(), 
+            by=c("pathway"="gs_name"))
+# write gsea results
+f <- file.path(working_dir, paste0(prefix, "_results.tsv"))
+data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
+f <- file.path(working_dir, paste0(prefix, "_results.xlsx"))
+write_xlsx(gsea, f)
+
+#
+# Gene Ontology analysis
+#
+prefix <- "gsea_gobp"
+padj_cutoff <- 0.01
+gsea <- run_batch_fgsea(analyses, de, gs_gobp, prefix, gsea_plot_dir, 
+                        padj_cutoff, do_plots=FALSE)
+gsea_gobp <- as_tibble(gsea) %>%
+  left_join(select(msigdb_gene_sets, gs_cat, gs_subcat, gs_name) %>% distinct(),
+            by=c("pathway"="gs_name"))
+# write gsea results
+f <- file.path(working_dir, paste0(prefix, "_results.tsv"))
+data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
+f <- file.path(working_dir, paste0(prefix, "_results.xlsx"))
+write_xlsx(gsea, f)
+
+```
+
+## GSEA plots
+
+```{r gsea plots}
+
+#
+# GSEA hallmark bar plots
+#
+table(gsea_hallmark$analysis)
+x <- gsea_hallmark
+x$pathway <- gsub("HALLMARK_", "", x$pathway)
+
+padj_cutoff <- 0.01
+w <- 6
+h <- 6
+
+for (a in unique(x$analysis)) {
+  n <- nrow(filter(x, analysis == a, padj < padj_cutoff))
+  if (n == 0) { next }
+  p <- plot_gsea_barplot(filter(x, analysis == a), padj_cutoff = padj_cutoff) +
+    theme(axis.text.y = element_text(size=6))
+  f <- file.path(plot_dir, paste0("gsea_hallmark_", a, ".pdf"))
+  ggsave(f, plot=p, width=w, height=h)
+}
+
+
+#
+# GSEA GOBP
+#
+table(gsea_gobp$analysis)
+x <- gsea_gobp
+x$pathway <- gsub("GOBP_", "", x$pathway)
+
+padj_cutoff <- 0.01
+ntop <- 25
+w <- 10
+h <- 6
+
+# my_ggp + theme(axis.text.x = element_text(size = 20))
+
+for (a in unique(x$analysis)) {
+  res_up <- filter(x, analysis == a) %>%
+    slice_max(NES, n=ntop)
+  res_dn <- filter(x, analysis == a) %>%
+    slice_min(NES, n=ntop)
+  res <- bind_rows(res_up, res_dn) %>% distinct(pathway, .keep_all=TRUE)
+  n <- nrow(filter(res, padj < padj_cutoff))
+  if (n == 0) { next }
+  p <- plot_gsea_barplot(res, padj_cutoff = padj_cutoff) + 
+    theme(axis.text.y = element_text(size=6))
+  f <- file.path(plot_dir, paste0("gsea_gobp_", a, ".pdf"))
+  ggsave(f, plot=p, width=w, height=h)
+}
+
+
+#
+# cptac plots comparing analysis
+#
+unique(gsea_cptac$analysis)
+padj_cutoff <- 0.01
+plotanalyses <- unique(gsea_cptac$analysis)
+
+donor_analyses <- c("pdacpanin_vs_pdacnl", "pdacpdac_vs_pdacpanin",
+                   "pdacpdac_vs_pdacnl", "nlpanin_vs_nlnl",  "nladm_vs_nlnl", 
+                   "nlpanin_vs_nladm", "pdacpanin_vs_nlpanin", "pdacnl_vs_nlnl")
+ipmn_analyses <- c("invinv_vs_invnl", "invhgd_vs_invnl", "invlgd_vs_invnl", 
+                  "invinv_vs_invlgd", "invhgd_vs_invlgd", "invinv_vs_invhgd", 
+                  "lgdlgd_vs_lgdnl", "invinv_vs_lgdnl", "invhgd_vs_lgdnl", 
+                  "invlgd_vs_lgdnl", "invinv_vs_lgdlgd", "invhgd_vs_lgdlgd", 
+                  "invlgd_vs_lgdlgd", "invnl_vs_lgdnl")
+
+x <- filter(gsea_cptac, analysis %in% plotanalyses)
+x <- x %>% mutate( 
+  sig = ifelse(padj < padj_cutoff, ifelse(NES < 0, "dn", "up"), "no"),
+  neglog10padj = -log10(x$padj),
+  score = NES * -log10(x$padj),
+  fillneglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA),
+  fillnes = ifelse(padj < padj_cutoff, NES, NA)
+)
+
+x <- x %>% mutate(
+  pathway = factor(gsub("CPTAC_RNA_ALL_", "", pathway), levels=c("DN", "UP")), 
+  analysis = fct_reorder(analysis, NES, .fun = function(x) { max(abs(x)) }),
+  facet = case_when(analysis %in% ipmn_analyses ~ "ipmn",
+                    analysis %in% donor_analyses ~ "donor_panc")
+)
+
+p <- ggplot(x, aes(x=analysis, y=NES, fill=fillneglog10padj)) +
+  geom_bar(stat="identity", position=position_dodge()) +
+  scale_fill_viridis_c() +
+  labs(x="Analysis", y="Normalized Enrichment Score",
+       title="PDAC DE Genes (CPTAC RNA-Seq)") + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1, size=6),
+        strip.clip = "off"
+  ) +
+  facet_grid(pathway ~ facet, scales = "free", space="free")
+p
+ggsave(file.path(plot_dir, "gsea_cptac_barplots.pdf"), p, width=12, height=5)
+
+
+#
+# pdac plots
+#
+unique(gsea_pdac$analysis)
+padj_cutoff <- 0.01
+plotanalyses <- unique(gsea_pdac$analysis)
+
+donor_analyses <- c("pdacpanin_vs_pdacnl", "pdacpdac_vs_pdacpanin",
+                   "pdacpdac_vs_pdacnl", "nlpanin_vs_nlnl",  "nladm_vs_nlnl", 
+                   "nlpanin_vs_nladm", "pdacpanin_vs_nlpanin", "pdacnl_vs_nlnl")
+ipmn_analyses <- c("invinv_vs_invnl", "invhgd_vs_invnl", "invlgd_vs_invnl", 
+                  "invinv_vs_invlgd", "invhgd_vs_invlgd", "invinv_vs_invhgd", 
+                  "lgdlgd_vs_lgdnl", "invinv_vs_lgdnl", "invhgd_vs_lgdnl", 
+                  "invlgd_vs_lgdnl", "invinv_vs_lgdlgd", "invhgd_vs_lgdlgd", 
+                  "invlgd_vs_lgdlgd", "invnl_vs_lgdnl")
+
+x <- filter(gsea_pdac, analysis %in% plotanalyses)
+x <- x %>% mutate( 
+  sig = ifelse(padj < padj_cutoff, ifelse(NES < 0, "dn", "up"), "no"),
+  neglog10padj = -log10(x$padj),
+  score = NES * -log10(x$padj),
+  fillneglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA),
+  fillnes = ifelse(padj < padj_cutoff, NES, NA)
+)
+
+x <- x %>% mutate(
+  pathway = factor(pathway),
+  analysis = fct_reorder(analysis, NES, .fun = function(x) { max(abs(x)) }),
+  facet = case_when(analysis %in% ipmn_analyses ~ "ipmn",
+                    analysis %in% donor_analyses ~ "donor_panc")
+)
+
+p <- ggplot(x, aes(x=analysis, y=NES, fill=fillneglog10padj)) +
+  geom_bar(stat="identity", position=position_dodge()) +
+  scale_fill_viridis_c() +
+  labs(x="Analysis", y="Normalized Enrichment Score",
+       title="GSEA PDAC DE genes") + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1, size=6),
+        strip.clip = "off"
+  ) +
+  facet_grid(pathway ~ facet, scales = "free", space="free")
+p
+ggsave(file.path(plot_dir, "gsea_pdac_barplots.pdf"), p, width=8, height=10)
+
+
+```
+
+
+## GSEA hallmark pathways across analysis
+
+```{r gsea pathway plots}
+
+padj_cutoff <- 0.01
+
+for (my_pathway in unique(gsea_hallmark$pathway)) {
+  x <- filter(gsea_hallmark, pathway == my_pathway)
+  x <- x %>% mutate( 
+    sig = ifelse(padj < padj_cutoff, ifelse(NES < 0, "dn", "up"), "no"),
+    neglog10padj = -log10(x$padj),
+    score = NES * -log10(x$padj),
+    fillneglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA),
+    fillnes = ifelse(padj < padj_cutoff, NES, NA),
+    analysis = forcats::fct_reorder(analysis, NES)
+  )
+  n <- nrow(filter(x, sig != "no"))
+  if (n == 0) { next }
+  
+  p <- ggplot(x, aes(x=analysis, y=NES, fill=fillneglog10padj)) +
+    geom_bar(stat="identity", position=position_dodge()) +
+    scale_fill_viridis_c() +
+    labs(x="Analysis", y="Normalized Enrichment Score",
+         title=paste0("GSEA ", my_pathway)) + 
+    theme_minimal() +
+    theme(plot.title = element_text(size=12),
+          axis.text.x = element_text(color="black", angle=90, vjust=0.5, hjust=1, size=6))
+  f <- file.path(plot_dir, paste0("gsea_hallmark_", my_pathway, ".pdf"))
+  ggsave(f, p, width=6, height=5)
+}
+
+
+```
+
+
+## GSVA / ssGSEA analysis
+
+```{r gsva analysis}
+library(GSVA)
+
+# Appreciate and cite code and signatures obtained from here:
+# https://github.com/PascaDiMagliano-Lab/Gift-of-Life-Public-Repository/blob/master/scripts/Spatial_Transcriptomics_Analysis/01_DGE_analysis.R
+
+## Collison geneset (https://pubmed.ncbi.nlm.nih.gov/21460848/)
+collison_gs <- list(
+  Collison_Exocrine_Like = c('REG1B','REG3A','REG1A','PNLIPRP2','CEL','PNLIP','PLA2G1B','CELA3A','CPB1','CELA3B','CTRB2','CLPS','CELA2B','PRSS2','PRSS1','GP2','SLC3A1','CFTR','SLC4A4','SPINK1'),
+  Collison_Basal = c('AIM2','FAM26F','GPM6B','S100A2','KRT14','CAV1','LOX','SLC2A3','TWIST1','PAPPA','NT5E','CKS2','HMMR','SLC5A3','PMAIP1','PHLDA1','SLC16A1','FERMT1','HK2','AHNAK2'),
+  Collison_Classical = c('TMEM45B','SDR16C5','GPRC5A','AGR2','S100P','FXYD3','ST6GALNAC1','CEACAM5','CEACAM6','TFF1','TFF3','CAPN8','FOXQ1','ELF3','ERBB3','TSPAN8','TOX3','LGALS4','PLS1','GPX2','ATP10B','MUC13'))
+
+## Moffit geneset (https://pubmed.ncbi.nlm.nih.gov/26343385/)
+moffit_gs <- list(
+  Moffit_Basal = c("VGLL1","UCA1","S100A2","LY6D","SPRR3","SPRR1B","LEMD1","KRT15","CTSL2","DHRS9","AREG","CST6","SERPINB3", "SERPINB4", "KRT6C", "KRT6A", "FAM83A", "SCEL", "FGFBP1", "KRT7", "KRT17", "GPR87", "TNS4", "SLC2A1", "ANXA8L2"),
+  Moffit_Classical = c("BTNL8","FAM3D","ATAD4","AGR3","CTSE","LOC400573","LYZ","TFF2","TFF1","ANXA10","LGALS4","PLA2G10", "CEACAM6","VSIG2","TSPAN8","ST6GALNAC1","AGR2","TFF3","CYP3A7","MYO1A","CLRN3","KRT20","CDH17","SPINK4","REG4")
+)
+
+## Bailey geneset (https://www.nature.com/articles/nature16965)
+bailey_gs <- list()
+bailey_gs[['Bailey_Basal']] <- c('PGAM1','ANGPTL4','ARPC2','ITGA3','PTPN1','GSDMC','DRAP1','ANXA8','LDHA','ARHGAP23','HCAR2','ULBP2','KIAA1609','PTHLH','CEBPB','SLC16A3','EGFR','PLXNA1','ZBED2','IL2A','TPD5212','DUSP14','FSCN1','RND3','GPR87','PANX1','S100A2','ANXA1','KRT6A','ADAM17','PTRF','EMLIN1','FBXL7','CERCAM','DDR2','GXYLT2','CHSY3','VSTM4','COL8A1','PRRX1','COL5A2','SPARC','FBN1','FAP','COL6A3','COL1A2','BNC2','EFEMP2','FSTL1','COL3A1','GSG2','KIF18A','CDCA5','CCNA2','MCM10','DEPDC1','UBE2C','KIF4A','CCNB1','KIF2C','SPAG5','TPX2','HIST1H2B0','BUB1','CKAP2L','PTTG1','CDC20','ERCC6L','NCAPG','NCAPH','PSMA7','CCT6A','CCT7','DKC1','HSPE1','EIF2S2','MRPL11','MRPL17','LYAR','PSMA1','EIF4A3','PPAT','HAT1','PAICS','BRIX1','RUVBL1','CKS1B','TOMM40','CCT5','ALYREF')
+bailey_gs[['Bailey_Classical']] <- c('LRRC66','GJB1','LGALS4','PLA2G10','PLS1','BCAS1','CAPN5','HNF4G','ARHGEF38','CAPN8','AP001187.9','ABP1','ERBB3','C9orf152','SLC44A4','IHH','HNF4A','FAM83E','PRR15L','EPS8L3')
+bailey_gs[['Bailey_ADEX']] <- c('REG3G','SYCN','REG1P','SERPINI2','CPB1','RP11-331F4.4','AQP8','RBPJL','CUZD1','PLA2G1B','CLPS','CEL','CELA3B','CELA3A','CTRB1','CTRC','CTRB2','PNLIPRP1','CPA1','CPA2','UNC79','GCK','GJD2','SYT4','KCNK16','NOL4','SCGN','INS','CABP7','CHGB','BEX1','SVOP','MR7-3HG','ABCC8','HMGCLL1','SLC30A8','SST','CELF3','PCSK2','SCG3')
+bailey_gs[['Bailey_Immunogenic']] <-  c('IGHV3-15','IGHV3-7','IGHV1-46','IGKV2-28','IGHV3-23','IGHV3-53','IGHV5-51','IGHA1','IGKV4-1','IGLV2-23','IGLV1-40','IGKV3-11','IGLL5','IGJ','IGLC3','IGKVLD-39','IGLV2-14','AC096579.7','IGKV3-20','IGKC','CSF1R','TYROBP','FCER1G','TLR8','C3AR1','CD86','WAS','SPI1','HAVCR2','SASH3','CYBB','MS4A4A','BTK','LAPTM5','PTPRC','MARCH1','CD53','AIF1','DOCK2','NCKAP1L','SIT1','GIMAP4','GPR174','SEPT1','CXCR6','ITK','TBC1D10C','GIMAP5','CD96','ZNF831','GZMK','PTPRCAP','SLAMF1','P2RY10','CD48','THEMIS','CD3E','CD3D','SH2D1A','CD2')
+
+## purist genes (genes that are used to compute purist score)
+purist_gs <- list(
+  PurIST_basal = c("GPR87", "KRT6A", "KRT17", "KRT15", "DCBLD2", "BCAR3", "PTGES", "ITGA3", "C16orf74", "S100A2", "KRT5"),
+  PurIST_classical = c("REG4", "ANXA10", "TFF1", "CDH17", "TSPAN8", "GATA6", "CLDN18", "LGALS4", "DDC", "SLC40A1", "CLRN3", "PLA2G10")
+)
+
+
+# filter genes measured by geomx platform
+subtypes_gs <- c(collison_gs, bailey_gs, moffit_gs)
+sapply(subtypes_gs, length)
+for (gs_name in names(subtypes_gs)) {
+  subtypes_gs[[gs_name]] <- intersect(subtypes_gs[[gs_name]], fds$meta$gene)
+}
+sapply(subtypes_gs, length)
+
+# GSVA
+y <- log2_norm_cpm
+res <- gsva(y, subtypes_gs, method="gsva")
+
+s <- fds$samples
+s$path <- gsub("_epithelial", "", s$path)
+s$path <- factor(s$path, levels=c("nl_nl", "pnet_nl", "ipmn_lgd_nl", 
+                                  "ipmn_inv_nl", "pdac_nl", 
+                                  "nl_adm", "nl_panin",
+                                  "ipmn_lgd_lgd", "ipmn_inv_lgd", "pdac_adm",
+                                  "pdac_panin", "ipmn_inv_hgd", "ipmn_inv_inv",
+                                  "pdac_pdac"),
+                 ordered=TRUE)
+
+color_scale <- color_scales$path
+names(color_scale) <- gsub("_epithelial", "", names(color_scale))
+
+
+for (i in 1:nrow(res)) {
+  gs_name = rownames(res)[i]
+  x <- s %>% add_column(gs_score = unlist(res[i,]))
+  p <- ggplot(x, aes(x=fct_reorder(patient, gs_score), y=gs_score, fill=path)) +
+    geom_boxplot(outlier.shape=NA, width=0.75) +
+    geom_point(position=position_jitterdodge(jitter.width=0.1),
+               aes(group=path), pch=21, size=2, alpha=0.8) +
+    ggtitle(paste0("GSVA: ", gs_name)) +
+    theme_bw() + 
+    theme(axis.text.x = element_text(size=6, color="black", angle=90, vjust=0.5, hjust=1),
+          axis.line = element_line(color = "black")) +
+    scale_fill_manual(values = color_scale) + 
+    facet_grid(~ study, scale="free_x")
+  f <- file.path(plot_dir, paste0("gsva_patient_", gs_name))
+  ggsave(paste0(f, ".pdf"), p, width=12, height=6)
+  
+  p <- ggplot(x, aes(x=fct_reorder(aoi, gs_score), y=gs_score, fill=path)) +
+    geom_col() +
+    ggtitle(paste0("GSVA: ", gs_name)) +
+    scale_fill_manual(values = color_scale) + 
+    facet_grid(~ patient, scale="free_x") +
+    theme_bw() + 
+    theme(axis.text.x = element_text(size=4, color="black", angle=90, vjust=0.5, hjust=1),
+          axis.line = element_line(color = "black")) +
+    theme(strip.text.x = element_text(angle = 90),
+          strip.clip = "off")
+  f <- file.path(plot_dir, paste0("gsva_aoi_", gs_name))
+  ggsave(paste0(f, ".pdf"), p, width=12, height=6)
+}
+
+
+
+# setup heatmap annotations
+annot_col <- column_to_rownames(fds$samples, "aoi") %>% 
+  select(study, patient, path_aoi, path_specimen) %>%
+  as.data.frame()
+
+
+
+# heatmap
+f <- file.path(plot_dir,  paste0("heatmap_gsva_pdac_subtypes"))
+h <- 6
+w <- 10
+
+p <- pheatmap(res,
+              color = colorRampPalette(c("navy", "white", "firebrick3"))(50),
+              breaks = seq(-2, 2, length.out=51),
+              border_color = NA,
+              scale="row",
+              cluster_rows = TRUE,
+              cluster_cols = TRUE,
+              clustering_distance_rows = "euclidean",
+              clustering_distance_cols = "euclidean",
+              clustering_method = "ward.D2",
+              annotation_col = annot_col,
+              annotation_colors = color_scales,
+              fontsize = 8,
+              fontsize_row = 8,
+              fontsize_col = 6,
+              filename = paste0(f, ".png"),
+              width = w,
+              height = h)
+save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
+
+
+```
+
+## PDAC purist score
+
+```{r purist score}
+
+calc_purist <- function(x, method="purist") {
+  
+  purist_baseline <- -6.815
+  purist_tbl <- tribble(
+    ~a, ~b, ~w,
+    "GPR87", "REG4", 1.994,
+    "KRT6A", "ANXA10", 2.031,
+    "BCAR3", "GATA6", 1.618,
+    "PTGES", "CLDN18", 0.922,
+    "ITGA3", "LGALS4", 1.059,
+    "C16orf74", "DDC", 0.929,
+    "S100A2", "SLC40A1", 2.505,
+    "KRT5", "CLRN3", 0.485
+  )
+  
+  puristn_baseline <- -12.414
+  puristn_tbl <- tribble(
+    ~a, ~b, ~w,
+    "GPR87", "REG4", 3.413,
+    "KRT6A", "ANXA10", 3.437,
+    "KRT17", "LGALS4", 2.078,
+    "S100A2", "TFF1", 2.651,
+    "C16orf74", "DDC", 0.901,
+    "KRT15", "PLA2G10", 2.677,
+    "PTGES", "CDH17", 2.911,
+    "DCBLD2", "TSPAN8", 1.903
+  )
+
+  if (method == "purist") {
+    tbl <- purist_tbl
+    baseline <- purist_baseline
+  } else {
+    tbl <- puristn_tbl
+    baseline <- puristn_baseline
+  }
+  
+  calc_score <- function(x) {
+    sum(tbl$w * as.integer(x[tbl$a] > x[tbl$b])) + baseline
+  }
+
+  scores <- apply(x, 2, calc_score)
+  probs <- exp(scores) / (1 + exp(scores))
+  subtypes <- if_else(scores > 0, "basal-like", "classical")
+  as_tibble(bind_cols(sample=colnames(x),
+                      score=scores, 
+                      prob=probs, 
+                      subtype=subtypes))
+}
+
+s <- fds$samples
+s$path <- gsub("_epithelial", "", s$path)
+s$path <- factor(s$path, levels=c("nl_nl", "pnet_nl", "ipmn_lgd_nl", 
+                                  "ipmn_inv_nl", "pdac_nl", 
+                                  "nl_adm", "nl_panin",
+                                  "ipmn_lgd_lgd", "ipmn_inv_lgd", "pdac_adm",
+                                  "pdac_panin", "ipmn_inv_hgd", "ipmn_inv_inv",
+                                  "pdac_pdac"),
+                 ordered=TRUE)
+
+color_scale <- color_scales$path
+names(color_scale) <- gsub("_epithelial", "", names(color_scale))
+
+y <- log2_norm_cpm
+purist <- calc_purist(log2_norm_cpm, method="purist")
+x <- bind_cols(s, select(purist, purist_score=score, purist_prob=prob, purist_subtype=subtype))
+
+p <- ggplot(x, aes(x=fct_reorder(patient, purist_prob), y=purist_prob, fill=path)) +
+  geom_boxplot(outlier.shape=NA, width=0.75) +
+  geom_point(position=position_jitterdodge(jitter.width=0.1),
+             aes(group=path), pch=21, size=2, alpha=0.8) +
+  theme_bw() + 
+  theme(axis.text.x = element_text(size=6, color="black", angle=90, vjust=0.5, hjust=1),
+        axis.line = element_line(color = "black")) +
+  scale_fill_manual(values = color_scale) + 
+  facet_grid(~ study, scale="free_x") +
+  ggtitle("pdac purist score")
+f <- file.path(plot_dir, paste0("purist_patient"))
+ggsave(paste0(f, ".pdf"), p, width=12, height=6)
+
+p <- ggplot(x, aes(x=fct_reorder(aoi, purist_prob), y=purist_prob, fill=path)) +
+  geom_col() +
+  scale_fill_manual(values = color_scale) + 
+  facet_grid(~ patient, scale="free_x") +
+  theme_bw() + 
+  theme(axis.text.x = element_text(size=4, color="black", angle=90, vjust=0.5, hjust=1),
+        axis.line = element_line(color = "black")) +
+  theme(strip.text.x = element_text(angle = 90),
+        strip.clip = "off") +
+  ggtitle("pdac purist score")
+f <- file.path(plot_dir, paste0("purist_aoi"))
+ggsave(paste0(f, ".pdf"), p, width=12, height=6)
+
+
+
+```
+
+
+## Plot individual genes
+
+```{r plot individual genes}
+
+y <- log2_norm_cpm
+s <- fds$samples
+s$patient <- factor(s$patient)
+s$patient_slide <- factor(paste0(s$patient, "_", s$slide))
+s$path_aoi <- factor(s$path_aoi, levels=c("nl", "adm", "panin", "lgd", "hgd", "inv", "pdac"))
+s$path_specimen <- factor(s$path_specimen, levels=c("nl", "ipmn_lgd", "ipmn_inv", "pnet", "pdac"))
+s$path_patient <- paste0(s$path_specimen, "_", s$path_aoi)
+s$path_patient <- factor(s$path_patient, 
+                         levels=c("nl_nl", "ipmn_lgd_nl", "ipmn_inv_nl", 
+                                  "pnet_nl", "pdac_nl", "nl_adm", "pdac_adm", 
+                                  "nl_panin", "pdac_panin", 
+                                  "ipmn_lgd_lgd", "ipmn_inv_lgd", 
+                                  "ipmn_inv_hgd", "ipmn_inv_inv", 
+                                  "pdac_pdac"))
+
+width = 8
+height = 5
+genes <- c("MUC5AC", "S100P", "SYTL2", "LRRTM4", "ST6GALNAC2", "TMEM67",
+           "EIF4A3", "CLDN18", "MSMB", 
+           "KRT17", "LAMB3", "LAMC2", "PNLIP", "AMY1A", "CLU",
+           "TNFAIP2", "MMP7", "MALL", "MUC6", "CEACAM5", "CEACAM1",
+           "PGC", "GALNT6", "CELA3A", "BPIFB1", "EPPK1", "PITX1", "LIF", 
+           "CTRB1", "NKX6-2", "OLFM4", "CD55", "POSTN", "RBP4", "POU5F1")
+#genes <- c("CD72", "DOK5", "ENO1", "POU2F2", "SUPT6H", "DNAJC17")
+for (g in genes) {
+  if (!(g %in% rownames(y))) { next }
+  p <- plot_gene(s, y, g, path_patient, path_patient) + 
+    scale_fill_manual(values=color_scales$path_patient)
+  f <- file.path(plot_dir, paste0("boxplot_gene_", g, ".pdf"))
+  ggsave(f, p, width=width, height=height)
+}
+
+#s <- s %>% filter(study == "ipmn")
+#y <- y[, s$aoi]
+genes <- c("CLU", "TNFAIP2", "MUC3A", "COL1A1", "MALL")
+for (g in genes) {
+  p <- plot_gene2(s, y, g, path_patient, path_patient) + 
+    scale_fill_manual(values=color_scales$path_patient)
+  f <- file.path(plot_dir, paste0("boxplot_gene_", g, ".pdf"))
+  ggsave(f, p, width=width, height=height)
+  p <- plot_gene2(s, y, g, patient, path_patient) + 
+    scale_fill_manual(values=color_scales$path_patient)
+  f <- file.path(plot_dir, paste0("boxplot_gene_by_patient_", g, ".pdf"))
+  ggsave(f, p, width=width, height=height)
+  p <- plot_gene2(s, y, g, patient_slide, path_patient) + 
+    scale_fill_manual(values=color_scales$path_patient)
+  f <- file.path(plot_dir, paste0("boxplot_gene_by_patient_slide_", g, ".pdf"))
+  ggsave(f, p, width=width, height=height)
+}
+
+
+```
+
+
+## Predict NL, LGD, HGD
+
+```{r}
+
+
+
+```
+
