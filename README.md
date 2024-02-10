@@ -1,1 +1,1 @@
-# stgeomx_panc_wta
+# stgeomx_ipmn_wta
