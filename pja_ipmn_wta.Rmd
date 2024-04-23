@@ -107,6 +107,7 @@ for (d in c(results_dir, plot_dir, gsea_plot_dir)) {
 color_scales = list(
   cluster = c(c1="#fc6a03", c2="#63c5da", c3="#710193"),
   cluster_name = c(cHR="#fc6a03", cLR="#63c5da", cNL="#710193"),
+  cluster_nllgd_name = c(cHR="#fc6a03", cLR="#63c5da", cNL="#710193"),
   path_aoi = c(nl="#0044ff", lgd="#00ffff", hgd="#ffff00", inv="#ff0000"),
   path_specimen = c(ipmn_lgd="#00ffff", ipmn_inv="#cc0000"),
   path = c(ipmn_lgd_nl_epithelial ="#0044ff", 
@@ -616,7 +617,7 @@ most_var_genes <- function(x, ntop=500, span=0.50) {
   )
   lovar <- loess(v ~ u, data=tbl, span=span)
   tbl$lovar <- predict(lovar)
-  tbl$vadj <- abs(tbl$v / tbl$lovar)
+  tbl$vadj <- abs(tbl$v - tbl$lovar)
   keep <- order(tbl$vadj, decreasing=TRUE)[seq_len(min(ntop, nrow(tbl)))]
   return(x[keep,])
 }
@@ -634,7 +635,7 @@ tbl <- bind_cols(
 )
 lovar <- loess(v ~ u, data=tbl, span=myspan)
 tbl$lovar <- predict(lovar)
-tbl$vadj <- abs(tbl$v / tbl$lovar)
+tbl$vadj <- abs(tbl$v - tbl$lovar)
 tbl <- tbl %>% 
   mutate(rank = min_rank(-vadj)) %>%
   arrange(rank)
@@ -736,6 +737,7 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=bg_auc)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_viridis_c() +
   theme_bw() +
+  theme(aspect.ratio=1) +
   labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
 f <- file.path(plot_dir, paste0("pca_bg_auc.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
@@ -745,6 +747,7 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=patient, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values = pals::cols25()) +
   theme_bw() +
+  theme(aspect.ratio=1) +
   labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
 f <- file.path(plot_dir, paste0("pca_patient.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
@@ -754,6 +757,7 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=path_specimen, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values=color_scales$path_specimen) +
   theme_bw() +
+  theme(aspect.ratio=1) +
   labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
 f <- file.path(plot_dir, paste0("pca_path_specimen.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
@@ -763,6 +767,7 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values=color_scales$path_aoi) +
   theme_bw() +
+  theme(aspect.ratio=1) +
   labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
 f <- file.path(plot_dir, paste0("pca_path_aoi.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
@@ -772,6 +777,7 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=path, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values=color_scales$path) +
   theme_bw() +
+  theme(aspect.ratio=1) +
   labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
 f <- file.path(plot_dir, paste0("pca_path.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
@@ -785,12 +791,14 @@ p1 <- ggplot(x, aes(x=PC1, y=PC2, color=patient, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values = pals::cols25()) +
   theme_bw() +
+  theme(aspect.ratio=1) +
   theme(legend.position="none") +
   labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
 p2 <- ggplot(x, aes(x=PC3, y=PC2, color=patient, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values = pals::cols25()) +
   theme_bw() +
+  theme(aspect.ratio=1) +
   labs(x=res.pca_var_txt[3], y=res.pca_var_txt[2])
 p <- p1 + p2
 f <- file.path(plot_dir, paste0("pca_patient_12_23.pdf"))
@@ -803,12 +811,14 @@ p1 <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values = color_scales$path_aoi) +
   theme_bw() +
+  theme(aspect.ratio=1) +
   theme(legend.position="none") +
   labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
 p2 <- ggplot(x, aes(x=PC3, y=PC2, color=path_aoi, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values = color_scales$path_aoi) +
   theme_bw() +
+  theme(aspect.ratio=1) +
   labs(x=res.pca_var_txt[3], y=res.pca_var_txt[2])
 p <- p1 + p2
 f <- file.path(plot_dir, paste0("pca_path_aoi_12_23.pdf"))
@@ -817,9 +827,9 @@ ggsave(f, plot=p, device="pdf", width=7, height=3)
 ```
 
 
-## Clustering based on PCA
+## PCA clustering
 
-```{r cluster}
+```{r pca clustering}
 # the following guides were used in this section:
 # guide: https://rpubs.com/KarolinaSzczesna/862710
 # guide: https://rpubs.com/Bury/ClusteringOnPcaResults
@@ -837,84 +847,126 @@ ggsave(f, plot=p, device="pdf", width=4, height=4)
 # set number of clusters
 nclusters <- 3
 
-# hierarchical clustering based on first two PCs
+# commented out: hierarchical clustering based on first two PCs
 x <- res.pca$x[,1:2]
-#d <- dist(scale(t(y)))
 d <- dist(x)
+#hc <- hclust(d, method="complete")
 hc <- hclust(d, method="ward.D2")
 memb <- cutree(hc, k=nclusters)
 memb <- paste0("c", memb)
 
 # commented out: decided to use hierarchical clustering
 # kmeans clustering based on PCs
-# km <- kmeans(x, centers=nclusters)
-# memb <- paste0("c", km$cluster)
+#km <- kmeans(x, centers=nclusters)
+#memb <- paste0("c", km$cluster)
+
+# pam
+x <- res.pca$x[,1:2]
+d <- dist(x)
+pamx <- cluster::pam(d, k=3)
+memb <- paste0("c", pamx$clustering)
 
 # add cluster membership to sample properties
-fds$samples$cluster <- memb 
+fds$samples$cluster <- memb
 
-
-```
-
-## PCA cluster plots
-
-```{r}
 # plot clustering
 x <- bind_cols(fds$samples, as_tibble(res.pca$x))
 
 # cluster
-p1 <- ggplot(x, aes(x=PC1, y=PC2, color=cluster, shape=path_specimen)) +
+p1 <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen)) +
+  geom_point(alpha = 0.8, size=3) +
+  scale_color_manual(values = color_scales$path_aoi) +
+  theme_bw() +
+  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+p2 <- ggplot(x, aes(x=PC1, y=PC2, color=cluster, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values = color_scales$cluster) +
   theme_bw() +
   labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
-p2 <- ggplot(x, aes(x=PC3, y=PC2, color=cluster, shape=path_specimen)) +
-  geom_point(alpha = 0.8, size=3) +
-  scale_color_manual(values = color_scales$cluster) +
-  theme_bw() +
-  labs(x=res.pca_var_txt[3], y=res.pca_var_txt[2])
-p <- p1
-f <- file.path(plot_dir, paste0("pca_cluster.pdf"))
-ggsave(f, plot=p, device="pdf", width=width, height=height)
-p <- p1 + theme(legend.position="none") + p2
-f <- file.path(plot_dir, paste0("pca_cluster_12_23.pdf"))
-ggsave(f, plot=p, device="pdf", width=7, height=3)
+p1 + p2
 
 
 #
-# plots with just normal and lgd regions
+# identify clusters based on pca relationships
 #
-alpha_aoi <- c("nl"=1, "lgd"=1, "hgd"=0.1, "inv"=0.1)
-p <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen, alpha=path_aoi)) +
-  geom_point(size=3) +
-  scale_alpha_manual(values=alpha_aoi) +
-  scale_color_manual(values=color_scales$path_aoi) +
-  theme_bw() +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
-f <- file.path(plot_dir, paste0("pca_path_aoi_nllgd.pdf"))
-ggsave(f, plot=p, device="pdf", width=width, height=height)
-
-p <- ggplot(x, aes(x=PC1, y=PC2, color=cluster, shape=path_specimen, alpha=path_aoi)) +
-  geom_point(size=3) +
-  scale_alpha_manual(values=alpha_aoi) +
-  scale_color_manual(values=color_scales$cluster) +
-  theme_bw() +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
-f <- file.path(plot_dir, paste0("pca_path_cluster_nllgd.pdf"))
-ggsave(f, plot=p, device="pdf", width=width, height=height)
-
-
-```
-
-## Identify clusters based on histological patterns
-
-```{r identify clusters}
-
 fds$samples <- fds$samples %>% mutate(
-  cluster_name = case_when(cluster == "c1" ~ "cHR",
-                           cluster == "c2" ~ "cLR",
+  cluster_name = case_when(cluster == "c1" ~ "cLR",
+                           cluster == "c2" ~ "cHR",
                            cluster == "c3" ~ "cNL")
 )
+x <- bind_cols(fds$samples, as_tibble(res.pca$x))
+
+#
+# single multipanel plot for figure
+# 
+# path specimen
+p1 <- ggplot(x, aes(x=PC1, y=PC2, color=path_specimen, shape=path_specimen)) +
+  geom_point(alpha = 0.8, size=3) +
+  scale_color_manual(values=color_scales$path_specimen) +
+#  coord_fixed() +
+  theme_bw() +
+  theme(aspect.ratio=1) +
+  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+
+# path aoi
+p2 <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen)) +
+  geom_point(alpha = 0.8, size=3) +
+  scale_color_manual(values=color_scales$path_aoi) +
+#  coord_fixed() +
+  theme_bw() +
+  theme(aspect.ratio=1) +
+  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+
+# cluster
+p3 <- ggplot(x, aes(x=PC1, y=PC2, color=cluster_name, shape=path_specimen)) +
+  geom_point(alpha = 0.8, size=3) +
+  scale_color_manual(values = color_scales$cluster_name) +
+#  coord_fixed() +
+  theme_bw() +
+  theme(aspect.ratio=1) +
+  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+
+# patient
+p4 <- ggplot(x, aes(x=PC1, y=PC2, color=patient, shape=path_specimen)) +
+  geom_point(alpha = 0.8, size=3) +
+  scale_color_manual(values = pals::cols25()) +
+#  coord_fixed() +
+  theme_bw() +
+  theme(aspect.ratio=1) +
+  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+
+p <- p1 + p2 + p3 + p4 + plot_layout(nrow=1)
+f <- file.path(plot_dir, paste0("pca_panel_plots.pdf"))
+ggsave(f, plot=p, device="pdf", width=16, height=6)
+
+
+# f <- file.path(plot_dir, paste0("pca_cluster.pdf"))
+# ggsave(f, plot=p, device="pdf", width=width, height=height)
+# p <- p1 + theme(legend.position="none") + p2 + theme(aspect.ratio=1)
+# f <- file.path(plot_dir, paste0("pca_cluster_12_23.pdf"))
+# ggsave(f, plot=p, device="pdf", width=7, height=3)
+
+
+# pairs plot of PCs
+
+p1 <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen)) +
+  geom_point(alpha = 0.8, size=3) +
+  scale_color_manual(values = color_scales$path_aoi) +
+  theme_bw() +
+  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+p2 <- ggplot(x, aes(x=PC3, y=PC2, color=path_aoi, shape=path_specimen)) +
+  geom_point(alpha = 0.8, size=3) +
+  scale_color_manual(values = color_scales$path_aoi) +
+  theme_bw() +
+  labs(x=res.pca_var_txt[3], y=res.pca_var_txt[2])
+p3 <- ggplot(x, aes(x=PC3, y=PC4, color=path_aoi, shape=path_specimen)) +
+  geom_point(alpha = 0.8, size=3) +
+  scale_color_manual(values = color_scales$path_aoi) +
+  theme_bw() +
+  labs(x=res.pca_var_txt[3], y=res.pca_var_txt[4])
+p1 + p2 + p3
+
+
 
 ```
 
@@ -1074,9 +1126,15 @@ res <- run_limma_trend(y, design, contrasts,
 table(res$contrast, res$de)
 de <- bind_rows(de, res)
 
-# write results
+# write all results
 table(de$contrast)
 write_xlsx(de, file.path(results_dir, "de_path.xlsx"))
+
+# write cluster results
+contrasts <- c("clusterHRvLR", "clusterHRvNL", "clusterLRvNL")
+x <- de %>% filter(contrast %in% contrasts)
+write_xlsx(x, file.path(results_dir, "de_clusters.xlsx"))
+
 
 ```
 
@@ -1139,6 +1197,8 @@ plot_pheatmap <- function(m,
            clustering_distance_rows = "euclidean",
            clustering_distance_cols = "euclidean",
            clustering_method = "ward.D2",
+#           cellwidth = 6,
+#           cellheight = 6,
            fontsize = 6,
            fontsize_row = 6,
            fontsize_col = 6,
@@ -1149,22 +1209,23 @@ plot_pheatmap <- function(m,
 
 # setup heatmap annotations
 gene_annot <- fds$meta %>%
+  left_join(hpa_pdac, by=c("gene"="gene_symbol")) %>%
   left_join(cptac_de_merged, by=c("gene"="gene_symbol")) %>%
   mutate(de_cptac_rna = replace_na(de_cptac_rna, "na"),
          de_cptac_prot = replace_na(de_cptac_prot, "na"))
 annot_row <- gene_annot %>%
-  select(gene, de_cptac_rna, de_cptac_prot) %>%
+  select(gene, prognostic, de_cptac_rna, de_cptac_prot) %>%
   column_to_rownames("gene") %>%
   as.data.frame()
 annot_col <- column_to_rownames(fds$samples, "aoi") %>% 
-  select(patient, path_aoi, path_specimen, cluster) %>%
+  select(patient, path_aoi, path_specimen, cluster_name) %>%
   as.data.frame()
 
 #
 # IPMN clusters
 #
 # de gene params
-padj_cutoff <- 1e-5
+padj_cutoff <- 0.01
 log2fc_cutoff <- 3
 ntop <- 10
 contrasts <- c("clusterHRvLR", "clusterHRvNL", "clusterLRvNL")
@@ -1188,21 +1249,10 @@ x <- sweep(x, 1, u, FUN="-")
 xmin <- -6
 xmax <- 6
 
-# standardize (divide by standard deviation)
-# s <- fds$samples
-# snl <- fds$samples %>% filter(cluster == "c3")
-# x <- log2_norm_cpm[g, s$aoi]
-# u <- apply(x[, snl$aoi], 1, median)
-# x <- sweep(x, 1, u, FUN="-")
-# v <- pmax(apply(x, 1, sd), 1)
-# x <- sweep(x, 1, v, FUN="/")
-# xmin <- -3
-# xmax <- 3
-
 # heatmap
 f <- file.path(plot_dir,  paste0("heatmap_de_cluster_markers_", ngenes, "_genes"))
-h <- round(3 + (length(g) / 10))
-w <- 10
+h <- 6
+w <- 6
 p <- plot_pheatmap(x, 
                    annot_col[s$aoi,], 
                    annot_row[g,], 
@@ -1386,6 +1436,7 @@ for (gene in cluster_marker_genes) {
     geom_point(alpha = 0.8, size=3) +
     scale_color_viridis_c() +
     theme_minimal() +
+    theme(aspect.ratio=1) +
     labs(x="PC1", y="PC2", title=gene)
   f <- file.path(plot_dir, paste0("pca_featureplot_", gene))
   ggsave(paste0(f, ".pdf"), plot=p, width=4, height=3)
@@ -1780,8 +1831,9 @@ gsea <- bind_rows(gsea_cptac, gsea_hpa_panc)
 gsea <- gsea %>%
   filter(pathway %in% pathways, analysis %in% contrasts)
 gsea <- mutate(gsea, neglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA))
+gsea$analysis <- factor(gsea$analysis, levels=contrasts)
 
-p <- ggplot(gsea, aes(x=reorder(analysis, NES), y=NES, fill=neglog10padj)) +
+p <- ggplot(gsea, aes(x=analysis, y=NES, fill=neglog10padj)) +
   geom_col() + 
   geom_hline(yintercept=0) +
   scale_fill_viridis_c() +
@@ -2078,175 +2130,6 @@ gsea_leading_edge_matrix <- function(x, my_padj_cutoff=0.01, min_gene_sets=2) {
   return(m)
 }
 
-# setup heatmap annotations
-gene_annot <- fds$meta %>%
-  left_join(hpa_pdac, by=c("gene"="gene_symbol")) %>%
-  left_join(cptac_de_merged, by=c("gene"="gene_symbol")) %>%
-  mutate(de_cptac_rna = replace_na(de_cptac_rna, "na"),
-         de_cptac_prot = replace_na(de_cptac_prot, "na"))
-annot_row <- gene_annot %>%
-  select(gene, prognostic, de_cptac_rna, de_cptac_prot) %>%
-  column_to_rownames("gene") %>%
-  as.data.frame()
-
-#
-# basal-like genes
-#
-padj_cutoff <- 0.05
-pathways <- c("Moffitt.F6_BasalLike.top250",
-              "Collisson.QM",
-              "ICGC.Squamous.Up",
-              "Chan_Seng_Yue.BasalA",
-              "Chan_Seng_Yue.BasalB")
-
-x <- filter(gsea_pdacr, analysis=="clusterHRvNL", pathway %in% pathways)
-m1 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
-colnames(m1) <- paste0("HRvNL_",colnames(m1))
-
-x <- filter(gsea_pdacr, analysis=="clusterHRvLR", pathway %in% pathways)
-m2 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
-colnames(m2) <- paste0("HRvLR_",colnames(m2))
-
-# combine matrices
-# select genes present in both analysis
-genes <- intersect(rownames(m1), rownames(m2))
-m1 <- m1[genes,]
-m2 <- m2[genes,]
-m <- cbind(m1, m2)
-
-# show intersection with CPTAC
-length(intersect(genes, gs_cptac$CPTAC_RNA_ALL_UP))
-length(intersect(genes, gs_cptac$CPTAC_PROT_ALL_UP))
-length(intersect(genes, gs_hpa_panc$HPA_PANCREATIC_CANCER_UNFAV_PROGNOSIS))
-# agreement across studies
-table(rowSums(sign(m)))
-
-p <- pheatmap(m, 
-              scale = "none",
-              color = colorRampPalette(c("blue", "white", "red"))(50),
-              breaks = seq(-1, 1, length.out=51),
-              cellwidth = 6,
-              cellheight = 6,
-              border_color = "black",
-              cluster_rows = TRUE,
-              cluster_cols = TRUE,
-              clustering_distance_rows = "euclidean",
-              clustering_distance_cols = "euclidean",
-              clustering_method = "ward.D2",
-              annotation_row = annot_row,
-              annotation_colors = color_scales,
-              fontsize_col = 4,
-              fontsize_row = 6)
-h <- 8
-w <- 6
-save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge_pdac_basal.pdf"), width=w, height=h)
-
-
-#
-# classical genes
-#
-padj_cutoff <- 0.05
-
-pathways <- c(
-  "Chan_Seng_Yue.ClassicalA",
-  "Chan_Seng_Yue.ClassicalB",
-  "Collisson.Classical",
-  "ICGC.Immunogenic.Up",
-  "Moffitt.F8_Classical.top250"
-)
-
-x <- filter(gsea_pdacr, analysis=="clusterHRvNL", pathway %in% pathways)
-m1 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
-colnames(m1) <- paste0("HRvNL_",colnames(m1))
-
-x <- filter(gsea_pdacr, analysis=="clusterLRvNL", pathway %in% pathways)
-m2 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
-colnames(m2) <- paste0("LRvNL_",colnames(m2))
-
-# combine matrices
-# select genes present in both analysis
-genes <- intersect(rownames(m1), rownames(m2))
-m1 <- m1[genes,]
-m2 <- m2[genes,]
-m <- cbind(m1, m2)
-
-# show intersection with CPTAC
-length(intersect(genes, gs_cptac$CPTAC_RNA_ALL_UP))
-length(intersect(genes, gs_cptac$CPTAC_PROT_ALL_UP))
-length(intersect(genes, gs_hpa_panc$HPA_PANCREATIC_CANCER_UNFAV_PROGNOSIS))
-
-
-p <- pheatmap(m, 
-              scale = "none",
-              color = colorRampPalette(c("blue", "white", "red"))(50),
-              breaks = seq(-1, 1, length.out=51),
-              cellwidth = 6,
-              cellheight = 6,
-              border_color = "black",
-              cluster_rows = TRUE,
-              cluster_cols = TRUE,
-              clustering_distance_rows = "euclidean",
-              clustering_distance_cols = "euclidean",
-              clustering_method = "ward.D2",
-              annotation_row = annot_row,
-              annotation_colors = color_scales,
-              fontsize_col = 4,
-              fontsize_row = 6)
-h <- 7
-w <- 5
-save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge_pdac_classical.pdf"), width=w, height=h)
-
-
-#
-# exocrine genes
-#
-padj_cutoff <- 0.05
-
-pathways <- c(
-  "Collisson.Exocrine",
-  "ICGC.ADEX.Up",
-  "Moffitt.F3_Exocrine.top250"
-)
-
-x <- filter(gsea_pdacr, analysis=="clusterHRvLR", pathway %in% pathways)
-m1 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
-colnames(m1) <- paste0("HRvLR_",colnames(m1))
-
-x <- filter(gsea_pdacr, analysis=="clusterHRvNL", pathway %in% pathways)
-m2 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
-colnames(m2) <- paste0("HRvNL_",colnames(m2))
-
-# combine matrices
-# select genes present in both analysis
-genes <- intersect(rownames(m1), rownames(m2))
-m1 <- m1[genes,]
-m2 <- m2[genes,]
-m <- cbind(m1, m2)
-
-p <- pheatmap(m, 
-              scale = "none",
-              color = colorRampPalette(c("blue", "white", "red"))(50),
-              breaks = seq(-1, 1, length.out=51),
-              cellwidth = 6,
-              cellheight = 6,
-              border_color = "black",
-              cluster_rows = TRUE,
-              cluster_cols = TRUE,
-              clustering_distance_rows = "euclidean",
-              clustering_distance_cols = "euclidean",
-              clustering_method = "ward.D2",
-              annotation_row = annot_row,
-              annotation_colors = color_scales,
-              fontsize_col = 4,
-              fontsize_row = 6)
-h <- 5
-w <- 5
-save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge_pdac_exocrine.pdf"), width=w, height=h)
-```
-
-## GSEA LE hallmark
-
-```{r gsea leading edge hallmark}
 
 gsea_leading_edge_matrix2 <- function(x, my_padj_cutoff=0.01, min_gene_sets=2) {
   # get significant pathways
@@ -2296,6 +2179,256 @@ gsea_leading_edge_matrix2 <- function(x, my_padj_cutoff=0.01, min_gene_sets=2) {
 }
 
 
+gsea_leading_edge_matrix3 <- function(x, 
+                                      my_padj_cutoff=0.01, 
+                                      min_gene_sets=2,
+                                      min_analyses=2) {
+  # get significant pathways
+  sig_pathways <- x %>%
+    filter(padj < my_padj_cutoff) %>% 
+    distinct(pathway) %>% 
+    pull()
+  # filter results for significant pathways
+  x <- x %>%
+    filter(pathway %in% sig_pathways) %>%
+    arrange(desc(NES))
+  sig_pathways <- factor(unique(x$pathway))
+  # assign direction to enrichment score
+  x$nes_sign <- factor(sign(x$NES))
+
+  # get leading edge genes
+  x <- x %>% unnest_longer(leadingEdge, values_to="gene")
+
+  # genes must be in leading edge of at least 'min_analyses' analysis
+  # and enrichment in the same direction
+  x <- x %>% 
+    group_by(gene, pathway, nes_sign) %>% 
+    filter(n() >= min_analyses) %>%
+    ungroup() %>%
+    mutate(analysis_pathway = paste0(analysis, ".", pathway))  
+
+  leading_edge_genes <- x %>% 
+    group_by(analysis) %>%
+    count(gene) %>% 
+    filter(n >= min_gene_sets) %>% 
+    arrange(desc(n)) %>% 
+    distinct(gene) %>% 
+    pull()
+  leading_edge_genes <- factor(leading_edge_genes)
+  
+  # filter results for leading edge genes
+  x <- x %>% filter(gene %in% leading_edge_genes)
+  
+  # table with genes (rows) vs pathways (columns)
+  x <- x %>% select(analysis_pathway, gene, NES) %>% 
+    pivot_wider(id_cols=gene, names_from=analysis_pathway, values_from=NES)
+  m <- x %>% column_to_rownames(var="gene")
+  m[is.na(m)] <- 0
+  return(m)
+}
+
+
+gsea_leading_edge_matrix4 <- function(gsea_tbl,
+                                      de_tbl,
+                                      gsea_padj_cutoff=0.01,
+                                      de_padj_cutoff=0.01,
+                                      min_gene_sets=2,
+                                      min_analyses=2) {
+  
+  # get leading edge from significant gsea results
+  x <- gsea_tbl %>% 
+    filter(padj < gsea_padj_cutoff) %>%
+    unnest_longer(leadingEdge, values_to="gene")
+  # join de table
+  x <- left_join(x, de_tbl, by=join_by(gene==gene, analysis==contrast), suffix=c("",".de"))
+  sig_de_genes <- x %>% 
+    filter(padj.de < de_padj_cutoff) %>%
+    distinct(gene) %>%
+    pull()
+  # keep genes that are significantly de
+  x <- x %>% filter(gene %in% sig_de_genes)
+  # get leading edge genes from significant gsea results
+  x$nes_sign <- factor(sign(x$NES))
+
+  # genes must be in leading edge of at least 'min_analyses' (same direction)
+  x <- x %>% 
+    group_by(gene, pathway, nes_sign) %>% 
+    filter(n() >= min_analyses) %>%
+    ungroup() %>%
+    mutate(analysis_pathway = paste0(analysis, ".", pathway))  
+
+  # gsea result must be significant in at least "min_gene_sets" pathways
+  leading_edge_genes <- x %>% 
+    group_by(analysis, nes_sign) %>%
+    count(gene) %>% 
+    filter(n >= min_gene_sets) %>% 
+    arrange(desc(n)) %>% 
+    distinct(gene) %>% 
+    pull()
+  leading_edge_genes <- factor(leading_edge_genes)
+  # filter results for leading edge genes
+  x <- x %>% filter(gene %in% leading_edge_genes)
+  
+  # table with genes (rows) vs analysis-pathways (columns)
+  x <- x %>% select(analysis_pathway, gene, log2fc) %>% 
+    pivot_wider(id_cols=gene, names_from=analysis_pathway, values_from=log2fc)
+  m <- x %>% column_to_rownames(var="gene")
+  m[is.na(m)] <- 0
+  return(m)
+}
+
+# setup heatmap annotations
+gene_annot <- fds$meta %>%
+  left_join(hpa_pdac, by=c("gene"="gene_symbol")) %>%
+  left_join(cptac_de_merged, by=c("gene"="gene_symbol")) %>%
+  mutate(de_cptac_rna = replace_na(de_cptac_rna, "na"),
+         de_cptac_prot = replace_na(de_cptac_prot, "na"))
+annot_row <- gene_annot %>%
+  select(gene, prognostic, de_cptac_rna, de_cptac_prot) %>%
+  column_to_rownames("gene") %>%
+  as.data.frame()
+
+
+#
+# basallike genes
+#
+padj_cutoff <- 0.01
+pathways <- c("Moffitt.F6_BasalLike.top250",
+              "Collisson.QM",
+              "ICGC.Squamous.Up",
+              "Chan_Seng_Yue.BasalA",
+              "Chan_Seng_Yue.BasalB")
+contrasts <- c("clusterHRvNL", "clusterHRvLR", "clusterLRvNL")
+
+x <- filter(gsea_pdacr, analysis %in% contrasts, pathway %in% pathways)
+m <- gsea_leading_edge_matrix4(x, de, gsea_padj_cutoff=padj_cutoff, min_gene_sets=2, min_analyses=1)
+
+# show intersection with CPTAC
+genes <- rownames(m)
+length(intersect(genes, gs_cptac$CPTAC_RNA_ALL_UP))
+length(intersect(genes, gs_cptac$CPTAC_PROT_ALL_UP))
+length(intersect(genes, union(gs_cptac$CPTAC_RNA_ALL_UP, gs_cptac$CPTAC_PROT_ALL_UP)))
+length(intersect(genes, gs_hpa_panc$HPA_PANCREATIC_CANCER_UNFAV_PROGNOSIS))
+# agreement across studies
+table(rowSums(sign(m)))
+
+p <- pheatmap(m, 
+              scale = "none",
+              color = colorRampPalette(c("blue", "white", "red"))(50),
+              breaks = seq(-1, 1, length.out=51),
+              cellwidth = 6,
+              cellheight = 6,
+              border_color = "black",
+              cluster_rows = TRUE,
+              cluster_cols = TRUE,
+              clustering_distance_rows = "euclidean",
+              clustering_distance_cols = "euclidean",
+              clustering_method = "ward.D2",
+              annotation_row = annot_row,
+              annotation_colors = color_scales,
+              fontsize_col = 4,
+              fontsize_row = 6)
+h <- 8
+w <- 6
+save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge_pdac_basal.pdf"), width=w, height=h)
+
+
+#
+# classical genes
+#
+padj_cutoff <- 0.01
+pathways <- c(
+  "Chan_Seng_Yue.ClassicalA",
+  "Chan_Seng_Yue.ClassicalB",
+  "Collisson.Classical",
+  "ICGC.Immunogenic.Up",
+  "Moffitt.F8_Classical.top250"
+)
+contrasts <- c("clusterHRvNL", "clusterHRvLR", "clusterLRvNL")
+
+x <- filter(gsea_pdacr, analysis %in% contrasts, pathway %in% pathways)
+m <- gsea_leading_edge_matrix4(x, de, gsea_padj_cutoff=padj_cutoff, min_gene_sets=2, min_analyses=1)
+
+# show intersection with CPTAC
+genes <- rownames(m)
+length(intersect(genes, gs_cptac$CPTAC_RNA_ALL_UP))
+length(intersect(genes, gs_cptac$CPTAC_PROT_ALL_UP))
+length(intersect(genes, union(gs_cptac$CPTAC_RNA_ALL_UP, gs_cptac$CPTAC_PROT_ALL_UP)))
+length(intersect(genes, gs_hpa_panc$HPA_PANCREATIC_CANCER_UNFAV_PROGNOSIS))
+# agreement across studies
+table(rowSums(sign(m)))
+
+p <- pheatmap(m, 
+              scale = "none",
+              color = colorRampPalette(c("blue", "white", "red"))(50),
+              breaks = seq(-1, 1, length.out=51),
+              cellwidth = 6,
+              cellheight = 6,
+              border_color = "black",
+              cluster_rows = TRUE,
+              cluster_cols = TRUE,
+              clustering_distance_rows = "euclidean",
+              clustering_distance_cols = "euclidean",
+              clustering_method = "ward.D2",
+              annotation_row = annot_row,
+              annotation_colors = color_scales,
+              fontsize_col = 4,
+              fontsize_row = 6)
+h <- 8
+w <- 5
+save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge_pdac_classical.pdf"), width=w, height=h)
+
+
+#
+# exocrine genes
+#
+padj_cutoff <- 0.01
+pathways <- c(
+  "Collisson.Exocrine",
+  "ICGC.ADEX.Up",
+  "Moffitt.F3_Exocrine.top250"
+)
+contrasts <- c("clusterHRvNL", "clusterHRvLR", "clusterLRvNL")
+
+x <- filter(gsea_pdacr, analysis %in% contrasts, pathway %in% pathways)
+m <- gsea_leading_edge_matrix4(x, de, gsea_padj_cutoff=padj_cutoff, min_gene_sets=2, min_analyses=1)
+
+# show intersection with CPTAC/prognosis
+genes <- rownames(m)
+length(intersect(genes, gs_cptac$CPTAC_RNA_ALL_DN))
+length(intersect(genes, gs_cptac$CPTAC_PROT_ALL_UP))
+length(intersect(genes, union(gs_cptac$CPTAC_RNA_ALL_DN, gs_cptac$CPTAC_PROT_ALL_DN)))
+length(intersect(genes, gs_hpa_panc$HPA_PANCREATIC_CANCER_UNFAV_PROGNOSIS))
+length(intersect(genes, gs_hpa_panc$HPA_PANCREATIC_CANCER_FAV_PROGNOSIS))
+# agreement across studies
+table(rowSums(sign(m)))
+
+p <- pheatmap(m, 
+              scale = "none",
+              color = colorRampPalette(c("blue", "white", "red"))(50),
+              breaks = seq(-1, 1, length.out=51),
+              cellwidth = 6,
+              cellheight = 6,
+              border_color = "black",
+              cluster_rows = TRUE,
+              cluster_cols = TRUE,
+              clustering_distance_rows = "euclidean",
+              clustering_distance_cols = "euclidean",
+              clustering_method = "ward.D2",
+              annotation_row = annot_row,
+              annotation_colors = color_scales,
+              fontsize_col = 4,
+              fontsize_row = 6)
+h <- 7
+w <- 5
+save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge_pdac_exocrine.pdf"), width=w, height=h)
+
+```
+
+## GSEA LE hallmark
+
+```{r gsea leading edge hallmark}
+
 # setup heatmap annotations
 gene_annot <- fds$meta %>%
   left_join(hpa_pdac, by=c("gene"="gene_symbol")) %>%
@@ -2309,17 +2442,17 @@ annot_row <- gene_annot %>%
   column_to_rownames("gene") %>%
   as.data.frame()
 
-padj_cutoff <- 0.05
 pathways <- c(
   "HALLMARK_INTERFERON_ALPHA_RESPONSE",
   "HALLMARK_INTERFERON_GAMMA_RESPONSE",
   "HALLMARK_TNFA_SIGNALING_VIA_NFKB",
   "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION"
 )
-contrasts <- c("clusterHRvLR", "clusterHRvNL")
+contrasts <- c("clusterHRvLR", "clusterHRvNL", "clusterLRvNL")
 
 x <- filter(gsea_hallmark, analysis %in% contrasts, pathway %in% pathways)
-m <- gsea_leading_edge_matrix2(x, my_padj_cutoff=padj_cutoff, min_gene_sets=1)
+m <- gsea_leading_edge_matrix4(x, de, gsea_padj_cutoff=0.01, de_padj_cutoff=0.01, 
+                               min_gene_sets=1, min_analyses=2)
 
 p <- pheatmap(m, 
               scale = "none",
@@ -2559,7 +2692,7 @@ ggsave(paste0(f, ".pdf"), p, width=5, height=4)
 
 ## GSVA PCA correlations
 
-```{r}
+```{r gsva pca correlation}
 
 gene_sets <- c("Moffitt.F3_Exocrine.top250",
                "Moffitt.F8_Classical.top250",
@@ -2567,7 +2700,7 @@ gene_sets <- c("Moffitt.F3_Exocrine.top250",
 pc_names <- c("PC1", "PC2")
 
 x <- bind_cols(fds$samples, as_tibble(res.pca$x), t(gsva_res))
-x <- x %>% select(aoi, path_specimen, path_aoi, cluster, all_of(pc_names), all_of(gene_sets))
+x <- x %>% select(aoi, path_specimen, path_aoi, cluster_name, all_of(pc_names), all_of(gene_sets))
 
 coefs <- matrix(nrow=length(pc_names), ncol=length(gene_sets), dimnames=list(pc_names, gene_sets))
 pvals <- matrix(nrow=length(pc_names), ncol=length(gene_sets), dimnames=list(pc_names, gene_sets))
@@ -2600,15 +2733,14 @@ p <- ggplot(x, aes(x=pc_value, y=gsva)) +
   geom_text(data=distinct(x, gs_name, pc_name, .keep_all=TRUE), 
             aes(label=label), x=Inf, y=Inf, size=3, vjust="inward", hjust="inward") + 
   theme_minimal() + 
+  theme(aspect.ratio=1) + 
   facet_grid(pc_name ~ gs_name)
-
 f <- file.path(plot_dir, "scatter_cor_pca_moffitt")
 ggsave(paste0(f, ".png"), p, width=7, height=5)
 ggsave(paste0(f, ".pdf"), p, width=7, height=5)
 
 
 ```
-
 
 # NL-LGD analysis
 
@@ -2666,6 +2798,7 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=bg_auc)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_viridis_c() +
   theme_bw() +
+  theme(aspect.ratio=1) +
   labs(x=nllgd.pca_var_txt[1], y=nllgd.pca_var_txt[2])
 f <- file.path(plot_dir, paste0("pca_nllgd_bg_auc.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
@@ -2675,6 +2808,7 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=patient, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values = pals::cols25()) +
   theme_bw() +
+  theme(aspect.ratio=1) +
   labs(x=nllgd.pca_var_txt[1], y=nllgd.pca_var_txt[2])
 f <- file.path(plot_dir, paste0("pca_nllgd_patient.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
@@ -2684,6 +2818,7 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=path_specimen, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values=color_scales$path_specimen) +
   theme_bw() +
+  theme(aspect.ratio=1) +
   labs(x=nllgd.pca_var_txt[1], y=nllgd.pca_var_txt[2])
 f <- file.path(plot_dir, paste0("pca_nllgd_path_specimen.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
@@ -2693,6 +2828,7 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values=color_scales$path_aoi) +
   theme_bw() +
+  theme(aspect.ratio=1) +
   labs(x=nllgd.pca_var_txt[1], y=nllgd.pca_var_txt[2])
 f <- file.path(plot_dir, paste0("pca_nllgd_path_aoi.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
@@ -2702,6 +2838,7 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=path, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values=color_scales$path) +
   theme_bw() +
+  theme(aspect.ratio=1) +
   labs(x=nllgd.pca_var_txt[1], y=nllgd.pca_var_txt[2])
 f <- file.path(plot_dir, paste0("pca_nllgd_path.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
@@ -2714,6 +2851,10 @@ ggsave(f, plot=p, device="pdf", width=width, height=height)
 
 ```{r nllgd cluster}
 
+# make nl_lgd cohort
+s <- fds$samples %>% filter(path_aoi %in% c("nl","lgd"))
+y <- log2_norm_cpm[, s$aoi]
+
 # choose number of clusters
 p <- fviz_nbclust(nllgd.pca$x, FUNcluster=hcut, method="silhouette")
 f <- file.path(plot_dir, paste0("pca_nllgd_fviz_nbclust.pdf"))
@@ -2723,22 +2864,26 @@ ggsave(f, plot=p, device="pdf", width=4, height=4)
 nclusters <- 3
 
 # hierarchical clustering based on first two PCs
-x <- nllgd.pca$x[,1:2]
-#d <- dist(scale(t(y)))
-d <- dist(x)
-hc <- hclust(d, method="ward.D2")
-memb <- cutree(hc, k=nclusters)
-memb <- paste0("c", memb)
+# x <- nllgd.pca$x[,1:2]
+# d <- dist(x)
+# hc <- hclust(d, method="ward.D2")
+# memb <- cutree(hc, k=nclusters)
+# memb <- paste0("c", memb)
 
 # commented out: decided to use hierarchical clustering
 # kmeans clustering based on PCs
 # km <- kmeans(x, centers=nclusters)
 # memb <- paste0("c", km$cluster)
 
+# pam
+x <- nllgd.pca$x[,1:2]
+d <- dist(x)
+pamx <- cluster::pam(d, k=3)
+memb <- paste0("c", pamx$clustering)
+
 # add cluster membership to sample properties
 s$cluster_nllgd <- memb
-
-# save samples
+# save clustering
 nllgd_samples <- s
 
 ```
@@ -2760,20 +2905,55 @@ p
 
 # identify clusters by plot
 nllgd_samples <- nllgd_samples %>% mutate(
-  cluster_nllgd_name = case_when(cluster_nllgd == "c1" ~ "cLR",
-                                 cluster_nllgd == "c2" ~ "cHR",
+  cluster_nllgd_name = case_when(cluster_nllgd == "c1" ~ "cHR",
+                                 cluster_nllgd == "c2" ~ "cLR",
                                  cluster_nllgd == "c3" ~ "cNL")
 )
 x <- bind_cols(nllgd_samples, as_tibble(nllgd.pca$x))
 
-p <- ggplot(x, aes(x=PC1, y=PC2, color=cluster_nllgd_name, shape=path_specimen)) +
+# path specimen
+p1 <- ggplot(x, aes(x=PC1, y=PC2, color=path_specimen, shape=path_specimen)) +
+  geom_point(alpha = 0.8, size=3) +
+  scale_color_manual(values=color_scales$path_specimen) +
+  theme_bw() +
+  theme(aspect.ratio=1) +
+  labs(x=nllgd.pca_var_txt[1], y=nllgd.pca_var_txt[2])
+
+# path aoi
+p2 <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen)) +
+  geom_point(alpha = 0.8, size=3) +
+  scale_color_manual(values=color_scales$path_aoi) +
+  theme_bw() +
+  theme(aspect.ratio=1) +
+  labs(x=nllgd.pca_var_txt[1], y=nllgd.pca_var_txt[2])
+
+# patient
+p3 <- ggplot(x, aes(x=PC1, y=PC2, color=patient, shape=path_specimen)) +
+  geom_point(alpha = 0.8, size=3) +
+  scale_color_manual(values = pals::cols25()) +
+  theme_bw() +
+  theme(aspect.ratio=1) +
+  labs(x=nllgd.pca_var_txt[1], y=nllgd.pca_var_txt[2])
+
+# cluster (original)
+p4 <- ggplot(x, aes(x=PC1, y=PC2, color=cluster_name, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values = color_scales$cluster_name) +
   theme_bw() +
+  theme(aspect.ratio=1) +
   labs(x=nllgd.pca_var_txt[1], y=nllgd.pca_var_txt[2])
-p
-f <- file.path(plot_dir, paste0("pca_nllgd_cluster.pdf"))
-ggsave(f, plot=p, device="pdf", width=width, height=height)
+
+# cluster (nl-lgd)
+p5 <- ggplot(x, aes(x=PC1, y=PC2, color=cluster_nllgd_name, shape=path_specimen)) +
+  geom_point(alpha = 0.8, size=3) +
+  scale_color_manual(values = color_scales$cluster_name) +
+  theme_bw() +
+  theme(aspect.ratio=1) +
+  labs(x=nllgd.pca_var_txt[1], y=nllgd.pca_var_txt[2])
+
+p <- p1 + p2 + p3 + p4 + theme(legend.position="none") + p5 + plot_layout(nrow=1)
+f <- file.path(plot_dir, paste0("pca_nllgd_pca_plots.pdf"))
+ggsave(f, plot=p, device="pdf", width=22, height=6)
 
 
 ```
@@ -2874,6 +3054,21 @@ write_xlsx(de, file.path(results_dir, "de_nllgd.xlsx"))
 
 ```
 
+## NL-LGD DE correlations
+
+```{r nllgd de correlations}
+
+# merge de analysis by gene
+nllgd_de_merged <- nllgd_de %>% select(gene, contrast, log2fc, padj, de) %>%
+  pivot_wider(names_from = contrast, values_from = c(log2fc, padj, de))
+
+cor.test(nllgd_de_merged$log2fc_clusterHRvNL, nllgd_de_merged$log2fc_clusterLRvNL)
+cor.test(nllgd_de_merged$log2fc_clusterHRvNL, nllgd_de_merged$log2fc_clusterHRvLR)
+cor.test(nllgd_de_merged$log2fc_clusterLRvNL, nllgd_de_merged$log2fc_clusterHRvLR)
+
+
+```
+
 ## NL-LGD DE plots
 
 ```{r nllgd de plots}
@@ -2893,10 +3088,6 @@ for (mycontrast in unique(nllgd_de$contrast)) {
 #
 # scatter plots
 #
-
-# merge de analysis by gene
-nllgd_de_merged <- nllgd_de %>% select(gene, contrast, log2fc, padj, de) %>%
-  pivot_wider(names_from = contrast, values_from = c(log2fc, padj, de))
 nlabel <- 10
 width <- 8
 height <- 8
@@ -3063,12 +3254,12 @@ annot_row <- gene_annot %>%
   as.data.frame()
 
 annot_col <- column_to_rownames(nllgd_samples, "aoi") %>% 
-  select(patient, path_aoi, path_specimen, cluster_name) %>%
+  select(patient, path_aoi, path_specimen, cluster_name, cluster_nllgd_name) %>%
   as.data.frame()
 
 
 # de gene params
-padj_cutoff <- 1e-5
+padj_cutoff <- 0.01
 log2fc_cutoff <- 3
 ntop <- 5
 contrasts <- c("clusterHRvLR", "clusterHRvNL", "clusterLRvNL")
@@ -3084,15 +3275,16 @@ g <- filter(nllgd_de, contrast %in% contrasts,
 ngenes <- length(g)
 cluster_marker_genes <- g
 
+g <- c("OLFM4", "CRISP3")
 #g <- label_data %>% pull(gene)
 
-# centered gene expression (subtract median)
+# centered gene expression (subtract mean)
 s <- nllgd_samples
 x <- log2_norm_cpm[g, s$aoi]
 u <- apply(x, 1, mean)
 x <- sweep(x, 1, u, FUN="-")
-xmin <- -6
-xmax <- 6
+xmin <- -4
+xmax <- 4
 
 # standardize (divide by standard deviation)
 # s <- fds$samples
@@ -3124,7 +3316,7 @@ p <- pheatmap(x,
               cluster_cols = TRUE,
               clustering_distance_rows = "euclidean",
               clustering_distance_cols = "euclidean",
-              clustering_method = "ward.D2",
+              clustering_method = "complete",
               fontsize = 6,
               fontsize_row = 6,
               fontsize_col = 6,
@@ -3137,8 +3329,368 @@ save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
 
 ```
 
+## NL-LGD GSEA
+
+```{r nllgd gsea}
+
+#
+# Setup analysis
+#
+table(nllgd_de$contrast)
+analyses <- unique(nllgd_de$contrast)
+
+#
+# CPTAC GSEA
+#
+prefix <- "gsea_nllgd_cptac"
+padj_cutoff <- 0.01
+gs <- gs_cptac
+gsea <- run_batch_fgsea(analyses, nllgd_de, gs, prefix, gsea_plot_dir, padj_cutoff, do_plots=FALSE)
+gsea_nllgd_cptac <- as_tibble(gsea)
+# write gsea results
+f <- file.path(results_dir, paste0(prefix, "_results.tsv"))
+data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
+f <- file.path(results_dir, paste0(prefix, "_results.xlsx"))
+write_xlsx(gsea, f)
+
+#
+# HPA (TCGA) GSEA
+#
+prefix <- "gsea_nllgd_hpa_panc"
+padj_cutoff <- 0.01
+gs <- gs_hpa_panc
+gsea <- run_batch_fgsea(analyses, nllgd_de, gs, prefix, gsea_plot_dir, padj_cutoff, do_plots=FALSE)
+gsea_nllgd_hpa_panc <- as_tibble(gsea)
+# write gsea results
+f <- file.path(results_dir, paste0(prefix, "_results.tsv"))
+data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
+f <- file.path(results_dir, paste0(prefix, "_results.xlsx"))
+write_xlsx(gsea, f)
+
+#
+# PDAC subtypes GSEA
+#
+prefix <- "gsea_nllgd_pdacr"
+padj_cutoff <- 0.01
+gs <- gs_pdacr
+gsea <- run_batch_fgsea(analyses, nllgd_de, gs, prefix, gsea_plot_dir, padj_cutoff, do_plots=FALSE)
+gsea_nllgd_pdacr <- as_tibble(gsea)
+# write gsea results
+f <- file.path(results_dir, paste0(prefix, "_results.tsv"))
+data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
+f <- file.path(results_dir, paste0(prefix, "_results.xlsx"))
+write_xlsx(gsea, f)
+
+#
+# Hallmark gene set analysis
+#
+prefix <- "gsea_nllgd_hallmark"
+padj_cutoff <- 0.01
+gsea <- run_batch_fgsea(analyses, nllgd_de, gs_hallmark, prefix, gsea_plot_dir, 
+                        padj_cutoff, do_plots=FALSE)
+gsea_nllgd_hallmark <- as_tibble(gsea) %>%
+  left_join(select(msigdb_gene_sets, gs_cat, gs_name) %>% distinct(), 
+            by=c("pathway"="gs_name"))
+# write gsea results
+f <- file.path(results_dir, paste0(prefix, "_results.tsv"))
+data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
+f <- file.path(results_dir, paste0(prefix, "_results.xlsx"))
+write_xlsx(gsea, f)
+
+#
+# 3CA gene set analysis
+#
+prefix <- "gsea_nllgd_3ca"
+padj_cutoff <- 0.01
+gsea <- run_batch_fgsea(analyses, nllgd_de, gs_3ca, prefix, gsea_plot_dir, 
+                        padj_cutoff, do_plots=FALSE)
+gsea_nllgd_3ca <- as_tibble(gsea) %>%
+  left_join(select(msigdb_gene_sets, gs_cat, gs_name) %>% distinct(), 
+            by=c("pathway"="gs_name"))
+# write gsea results
+f <- file.path(results_dir, paste0(prefix, "_results.tsv"))
+data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
+f <- file.path(results_dir, paste0(prefix, "_results.xlsx"))
+write_xlsx(gsea, f)
+
+
+#
+# Gene Ontology analysis
+#
+prefix <- "gsea_nllgd_gobp"
+padj_cutoff <- 0.01
+gsea <- run_batch_fgsea(analyses, nllgd_de, gs_gobp, prefix, gsea_plot_dir, 
+                        padj_cutoff, do_plots=FALSE)
+gsea_nllgd_gobp <- as_tibble(gsea) %>%
+  left_join(select(msigdb_gene_sets, gs_cat, gs_name) %>% distinct(),
+            by=c("pathway"="gs_name"))
+# write gsea results
+f <- file.path(results_dir, paste0(prefix, "_results.tsv"))
+data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
+f <- file.path(results_dir, paste0(prefix, "_results.xlsx"))
+write_xlsx(gsea, f)
+
+```
+
+## NL-LGD GSEA plots
+
+```{r nllgd gsea plots}
+
+#
+# CPTAC and HPA
+#
+pathways <- c("CPTAC_PROT_ALL_DN", "CPTAC_PROT_ALL_UP",
+              "CPTAC_RNA_ALL_DN", "CPTAC_RNA_ALL_UP",
+              "HPA_PANCREATIC_CANCER_FAV_PROGNOSIS",
+              "HPA_PANCREATIC_CANCER_UNFAV_PROGNOSIS")
+contrasts <- c("clusterHRvLR", "clusterHRvNL", "clusterLRvNL")
+padj_cutoff <- 0.01
+
+x <- bind_rows(gsea_nllgd_cptac, gsea_nllgd_hpa_panc) %>% 
+  filter(analysis %in% contrasts, pathway %in% pathways) %>%
+#  mutate(group="nllgd", analysis = paste0("nllgd.", sub("cluster", "", analysis)))
+  mutate(group="nllgd", analysis = sub("cluster", "", analysis))
+y <- bind_rows(gsea_cptac, gsea_hpa_panc) %>% 
+  filter(analysis %in% contrasts, pathway %in% pathways) %>%
+#  mutate(group="all", analysis = paste0("all.", sub("cluster", "", analysis)))
+  mutate(group="all", analysis = sub("cluster", "", analysis))
+
+gsea <- bind_rows(x, y)
+#gsea <- bind_rows(gsea_cptac, gsea_hpa_panc)
+#gsea <- gsea %>%
+#  filter(pathway %in% pathways, analysis %in% contrasts)
+#gsea <- gsea %>% filter(analysis %in% contrasts)
+gsea <- mutate(gsea, neglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA))
+
+p <- ggplot(gsea, aes(x=reorder(analysis, NES), y=NES, fill=neglog10padj)) +
+  geom_col() + 
+  geom_hline(yintercept=0) +
+  scale_fill_viridis_c() +
+  theme_bw() + 
+  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
+  theme(strip.text = element_text(size=8)) +
+  facet_grid(pathway ~ group) + 
+  labs(x="GSEA Analysis", y="Normalized Enrichment Score (NES)")
+f <- paste0("gsea_nllgd_barplot_clusters_pdac")
+ggsave(file.path(plot_dir, paste0(f, ".pdf")), p, width=3, height=9)
+ggsave(file.path(plot_dir, paste0(f, ".png")), p, width=3, height=9)
+
+
+#
+# Hallmark
+#
+padj_cutoff <- 0.01
+contrasts <- c("clusterHRvLR", "clusterHRvNL", "clusterLRvNL")
+
+x <- bind_rows(gsea_nllgd_hallmark) %>% 
+  filter(analysis %in% contrasts) %>%
+  mutate(group="nllgd", analysis = sub("cluster", "", analysis))
+y <- bind_rows(gsea_hallmark) %>% 
+  filter(analysis %in% contrasts) %>%
+  mutate(group="all", analysis = sub("cluster", "", analysis))
+gsea <- bind_rows(x, y)
+gsea <- mutate(gsea, pathway = gsub("HALLMARK_", "", pathway))
+gsea <- gsea %>% mutate(
+  neglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA),
+  sig = padj < padj_cutoff)
+
+# only keep significant results (at least one analysis)
+gsea <- gsea %>% group_by(pathway) %>%
+  filter(any(padj < padj_cutoff)) %>%
+  ungroup()
+
+# arrange by cluster 1v2 for readability
+pathway_levels <- gsea %>% 
+  filter(analysis == "HRvLR") %>%
+  arrange(NES) %>%
+  distinct(pathway) %>%
+  pull(pathway)
+gsea$pathway <- factor(gsea$pathway, levels=pathway_levels)
+
+p <- ggplot(gsea, aes(x=NES, y=pathway, fill=neglog10padj)) +
+  geom_col() + 
+  geom_hline(yintercept=0) +
+  scale_fill_viridis_c() +
+  xlim(-2.5,2.5) +
+  theme_bw() + 
+  theme(axis.text.y = element_text(color="black", size=6)) +
+#  theme(axis.text.x = element_text(color="black", angle = 90, vjust = 0.5, hjust=1)) +
+  theme(strip.text = element_text(size=8)) +
+  facet_grid(analysis ~ group) +
+  labs(x="Normalized Enrichment Score (NES)", y="Pathway")
+f <- paste0("gsea_nllgd_barplot_clusters_hallmark")
+ggsave(file.path(plot_dir, paste0(f, ".pdf")), p, width=6, height=8)
+ggsave(file.path(plot_dir, paste0(f, ".png")), p, width=6, height=8)
+
+
+#
+# Moffitt
+# 
+padj_cutoff <- 0.01
+contrasts <- c("clusterHRvLR", "clusterHRvNL", "clusterLRvNL")
+pathways <- c("Moffitt.F6_BasalLike.top250", 
+              "Moffitt.F8_Classical.top250",
+              "Moffitt.F3_Exocrine.top250")
+
+x <- gsea_nllgd_pdacr %>% 
+  filter(analysis %in% contrasts, pathway %in% pathways) %>%
+  mutate(group="nllgd", analysis = sub("cluster", "", analysis))
+y <- gsea_pdacr %>% 
+  filter(analysis %in% contrasts, pathway %in% pathways) %>%
+  mutate(group="all", analysis = sub("cluster", "", analysis))
+gsea <- bind_rows(x, y)
+gsea <- mutate(gsea, neglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA))
+
+p <- ggplot(gsea, aes(x=reorder(analysis, NES), y=NES, fill=neglog10padj)) +
+  geom_col() + 
+  geom_hline(yintercept=0) +
+  scale_fill_viridis_c() +
+  theme_bw() + 
+  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
+  theme(strip.text = element_text(size=8)) +
+  facet_grid(pathway ~ group) + 
+  labs(x="GSEA Analysis", y="Normalized Enrichment Score (NES)")
+f <- paste0("gsea_nllgd_barplot_clusters_moffitt")
+ggsave(file.path(plot_dir, paste0(f, ".pdf")), p, width=3, height=6)
+ggsave(file.path(plot_dir, paste0(f, ".png")), p, width=3, height=6)
+
+
+
+```
+
 
 # End of working analysis
+
+
+
+# gene plots
+
+```{r nllgd gene plots}
+
+
+plot_gene <- function(s, x, gene, aes_x, aes_color) {
+  exprs <- unlist(x[gene, ])
+  x <- s %>% add_column(gene = exprs)
+  p <- ggplot(x, aes(x={{ aes_x }}, y=gene, fill={{aes_color}})) +
+    geom_boxplot(outlier.shape = NA, width=0.75) +
+#    geom_violin(scale="width", width=0.5) +
+    geom_point(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.5)) +
+    ggtitle(paste0("Gene: ", gene)) +
+    theme_minimal() + 
+    theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
+    theme(axis.line = element_line(color = "black"))
+  return(p)
+}
+
+plot_gene2 <- function(s, x, gene, aes_x, aes_color) {
+  exprs <- unlist(x[gene, ])
+  x <- s %>% add_column(gene = exprs)
+  p <- ggplot(x, aes(x={{ aes_x }}, y=gene, fill={{aes_color}})) +
+    geom_boxplot(outlier.shape=NA, width=0.75) +
+    geom_point(position=position_jitterdodge(jitter.width=0.1), 
+               aes(group={{aes_color}}), pch=21) +
+    ggtitle(paste0("Gene: ", gene)) +
+    theme_bw() + 
+    theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
+    theme(axis.line = element_line(color = "black"))
+  return(p)
+}
+
+s <- fds$samples %>% filter(path_aoi %in% c("nl","lgd"))
+y <- log2_norm_cpm[, s$aoi]
+
+genes <- c("OLFM4", "MALL", "TNS4", "CLDN4", "DUOX2")
+
+w <- 5
+h <- 4
+
+
+g <- "OLFM4"
+
+x <- s %>% add_column(gene = y[g,])
+p <- ggplot(x, aes(x=path_specimen, y=gene, fill=cluster_name)) +
+  geom_boxplot(outlier.shape=NA, width=0.75) +
+  geom_point(aes(group=cluster_name),
+             position=position_jitterdodge(jitter.width=0.1)) + 
+  facet_wrap(~patient)
+
+
+p <- ggplot(x, aes(x={{ aes_x }}, y=gene, fill={{aes_color}})) +
+  geom_boxplot(outlier.shape=NA, width=0.75) +
+  geom_point(position=position_jitterdodge(jitter.width=0.1), 
+             aes(group={{aes_color}}), pch=21) +
+  ggtitle(paste0("Gene: ", gene)) +
+  theme_bw() + 
+  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
+  theme(axis.line = element_line(color = "black"))
+return(p)
+  
+
+p <- plot_gene(s, y, "OLFM4", path_aoi, path_specimen) + 
+  scale_fill_manual(values=color_scales$path_aoi)
+
+
+for (g in genes) {
+  if (!(g %in% rownames(y))) { next }
+  p <- plot_gene(s, y, g, path_patient, path_patient) + 
+    scale_fill_manual(values=color_scales$path_patient)
+  f <- file.path(plot_dir, paste0("boxplot_gene_", g, ".pdf"))
+  ggsave(f, p, width=width, height=height)
+}
+
+#s <- s %>% filter(study == "ipmn")
+#y <- y[, s$aoi]
+genes <- c("CLU", "TNFAIP2", "MUC3A", "COL1A1", "MALL")
+for (g in genes) {
+  p <- plot_gene2(s, y, g, path_patient, path_patient) + 
+    scale_fill_manual(values=color_scales$path_patient)
+  f <- file.path(plot_dir, paste0("boxplot_gene_", g, ".pdf"))
+  ggsave(f, p, width=width, height=height)
+  p <- plot_gene2(s, y, g, patient, path_patient) + 
+    scale_fill_manual(values=color_scales$path_patient)
+  f <- file.path(plot_dir, paste0("boxplot_gene_by_patient_", g, ".pdf"))
+  ggsave(f, p, width=width, height=height)
+  p <- plot_gene2(s, y, g, patient_slide, path_patient) + 
+    scale_fill_manual(values=color_scales$path_patient)
+  f <- file.path(plot_dir, paste0("boxplot_gene_by_patient_slide_", g, ".pdf"))
+  ggsave(f, p, width=width, height=height)
+}
+
+
+```
+
+
+
+
+# End of working analysis
+
+```{r nllgd plots}
+
+#
+# plots with just normal and lgd regions
+#
+alpha_aoi <- c("nl"=1, "lgd"=1, "hgd"=0.1, "inv"=0.1)
+p <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen, alpha=path_aoi)) +
+  geom_point(size=3) +
+  scale_alpha_manual(values=alpha_aoi) +
+  scale_color_manual(values=color_scales$path_aoi) +
+  theme_bw() +
+  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+f <- file.path(plot_dir, paste0("pca_path_aoi_nllgd.pdf"))
+ggsave(f, plot=p, device="pdf", width=width, height=height)
+
+p <- ggplot(x, aes(x=PC1, y=PC2, color=cluster_name, shape=path_specimen, alpha=path_aoi)) +
+  geom_point(size=3) +
+  scale_alpha_manual(values=alpha_aoi) +
+  scale_color_manual(values=color_scales$cluster_name) +
+  theme_bw() +
+  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+f <- file.path(plot_dir, paste0("pca_path_cluster_nllgd.pdf"))
+ggsave(f, plot=p, device="pdf", width=width, height=height)
+
+
+
+```
 
 
 
@@ -3720,6 +4272,122 @@ for (g in genes) {
 
 ```
 
+# old LE analysis
+
+```{r le analysis old}
+
+padj_cutoff <- 0.01
+pathways <- c(
+  "Collisson.Exocrine",
+  "ICGC.ADEX.Up",
+  "Moffitt.F3_Exocrine.top250"
+)
+
+x <- filter(gsea_pdacr, analysis=="clusterHRvLR", pathway %in% pathways)
+m1 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
+colnames(m1) <- paste0("HRvLR_",colnames(m1))
+
+x <- filter(gsea_pdacr, analysis=="clusterHRvNL", pathway %in% pathways)
+m2 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
+colnames(m2) <- paste0("HRvNL_",colnames(m2))
+
+# combine matrices
+# select genes present in both analysis
+genes <- intersect(rownames(m1), rownames(m2))
+m1 <- m1[genes,]
+m2 <- m2[genes,]
+m <- cbind(m1, m2)
+
+p <- pheatmap(m, 
+              scale = "none",
+              color = colorRampPalette(c("blue", "white", "red"))(50),
+              breaks = seq(-1, 1, length.out=51),
+              cellwidth = 6,
+              cellheight = 6,
+              border_color = "black",
+              cluster_rows = TRUE,
+              cluster_cols = TRUE,
+              clustering_distance_rows = "euclidean",
+              clustering_distance_cols = "euclidean",
+              clustering_method = "ward.D2",
+              annotation_row = annot_row,
+              annotation_colors = color_scales,
+              fontsize_col = 4,
+              fontsize_row = 6)
+h <- 5
+w <- 5
+save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge_pdac_exocrine.pdf"), width=w, height=h)
+
+#
+# basal-like genes
+#
+padj_cutoff <- 0.05
+pathways <- c("Moffitt.F6_BasalLike.top250",
+              "Collisson.QM",
+              "ICGC.Squamous.Up",
+              "Chan_Seng_Yue.BasalA",
+              "Chan_Seng_Yue.BasalB")
+
+x <- filter(gsea_pdacr, analysis=="clusterHRvNL", pathway %in% pathways)
+m1 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
+colnames(m1) <- paste0("HRvNL_",colnames(m1))
+
+x <- filter(gsea_pdacr, analysis=="clusterHRvLR", pathway %in% pathways)
+m2 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
+colnames(m2) <- paste0("HRvLR_",colnames(m2))
+
+# combine matrices
+# select genes present in both analysis
+genes <- intersect(rownames(m1), rownames(m2))
+m1 <- m1[genes,]
+m2 <- m2[genes,]
+m <- cbind(m1, m2)
+
+# show intersection with CPTAC
+length(intersect(genes, gs_cptac$CPTAC_RNA_ALL_UP))
+length(intersect(genes, gs_cptac$CPTAC_PROT_ALL_UP))
+length(intersect(genes, gs_hpa_panc$HPA_PANCREATIC_CANCER_UNFAV_PROGNOSIS))
+# agreement across studies
+table(rowSums(sign(m)))
+
+p <- pheatmap(m, 
+              scale = "none",
+              color = colorRampPalette(c("blue", "white", "red"))(50),
+              breaks = seq(-1, 1, length.out=51),
+              cellwidth = 6,
+              cellheight = 6,
+              border_color = "black",
+              cluster_rows = TRUE,
+              cluster_cols = TRUE,
+              clustering_distance_rows = "euclidean",
+              clustering_distance_cols = "euclidean",
+              clustering_method = "ward.D2",
+              annotation_row = annot_row,
+              annotation_colors = color_scales,
+              fontsize_col = 4,
+              fontsize_row = 6)
+h <- 8
+w <- 6
+save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge_pdac_basal.pdf"), width=w, height=h)
+
+
+x <- filter(gsea_pdacr, analysis=="clusterHRvNL", pathway %in% pathways)
+m1 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
+colnames(m1) <- paste0("HRvNL_",colnames(m1))
+
+x <- filter(gsea_pdacr, analysis=="clusterLRvNL", pathway %in% pathways)
+m2 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
+colnames(m2) <- paste0("LRvNL_",colnames(m2))
+
+# combine matrices
+# select genes present in both analysis
+genes <- intersect(rownames(m1), rownames(m2))
+m1 <- m1[genes,]
+m2 <- m2[genes,]
+m <- cbind(m1, m2)
+
+```
+
 
 # extra GSEA plots
 
@@ -4029,8 +4697,8 @@ label_data <- gsea %>%
 p <- ggplot(gsea, aes(x=NES_cluster1v2, y=NES_cluster1v3, 
                       color=neglog10padj_cluster1v3, 
                       fill=neglog10padj_cluster1v2)) +
-  geom_point(data=filter(gsea, sig_cluster1v3 | sig_cluster1v2), pch=21, size=3, stroke=2) + 
-  geom_point(data=filter(gsea, !(sig_cluster1v3 | sig_cluster1v2)), pch=21, size=1, stroke=1) +
+  geom_point(data=filter(gsea, sig_cluster1v3 | sig_cluster1v2), pch=21, size=3) + 
+  geom_point(data=filter(gsea, !(sig_cluster1v3 | sig_cluster1v2)), pch=21, size=1) +
   geom_text_repel(data=label_data, aes(label=pathway), color="black", size=3, max.overlaps=Inf) +
   scale_fill_viridis_c(limits=c(2,4), oob=scales::oob_squish) +
   scale_color_viridis_c(limits=c(2,4), oob=scales::oob_squish) +
