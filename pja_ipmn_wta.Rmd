@@ -56,7 +56,7 @@ data_dir <- file.path(working_dir, "external_data")
 
 # ipmn dataset and annotations
 pja_ipmn_geomx_xlsx <- file.path(geomx_dir, "pja_ipmn_wta_2022-12-02.xlsx")
-pja_ipmn_geomx_annot_xlsx <- file.path(geomx_dir, "pja_ipmn_wta_annot_2023-04-13.xlsx")
+pja_ipmn_geomx_annot_xlsx <- file.path(geomx_dir, "pja_ipmn_wta_annot_2023-05-03.xlsx")
 
 # external resource files
 hpa_path_file <- file.path(data_dir, "hpa_pathology.tsv")
@@ -65,7 +65,7 @@ pdacr_gene_list_file <- file.path(data_dir, "pdacR_gene_lists.rds")
 
 # qc parameters
 geomx_negprobe_lod_quantile = 0.9
-geomx_min_counts = 50000
+geomx_min_counts = 20000
 geomx_min_auc = 0.60
 geomx_aoi_min_frac_expr = 0.2
 geomx_gene_min_frac_expr = 0.1
@@ -122,6 +122,10 @@ color_scales = list(
   moffitt_basallike = c(no="#aaaaaa", dn="#00FFFF", up="#FFFF00", na="#FFFFFF"),
   moffitt_classical = c(no="#aaaaaa", dn="#00FFFF", up="#FFFF00", na="#FFFFFF"),
   moffitt_exocrine = c(no="#aaaaaa", dn="#00FFFF", up="#FFFF00", na="#FFFFFF")
+)
+
+shape_scales <- list(
+  path_specimen = c(ipmn_inv=16, ipmn_lgd=17)
 )
 
 ```
@@ -412,12 +416,19 @@ fds <- stgeomx::normalize(fds, norm_method)
 nrow(ds$samples)
 nrow(fds$samples)
 table(ds$meta$keep)
+
+# final normalized gene expression matrix
+log2_norm_cpm <- log2(fds$x + 1)
+
+```
+# Color scales for patients
+
+```{r patient color scales}
+
 # set patient color scales
 x <- pals::cols25(length(unique(fds$samples$patient)))
 color_scales$patient = setNames(x, sort(unique(fds$samples$patient)))
 
-# final normalized gene expression matrix
-log2_norm_cpm <- log2(fds$x + 1)
 
 ```
 
@@ -617,67 +628,85 @@ most_var_genes <- function(x, ntop=500, span=0.50) {
   )
   lovar <- loess(v ~ u, data=tbl, span=span)
   tbl$lovar <- predict(lovar)
-  tbl$vadj <- abs(tbl$v - tbl$lovar)
+  tbl$vadj <- tbl$v - tbl$lovar
   keep <- order(tbl$vadj, decreasing=TRUE)[seq_len(min(ntop, nrow(tbl)))]
   return(x[keep,])
 }
+
+maplot <- function(y, ntop=1000, nlabel=100, myspan=0.5) {
+  tbl <- bind_cols(
+    g = rownames(y),
+    u = rowMeans(y),
+    v = apply(y, 1, function(x) var(x))
+  )
+  lovar <- loess(v ~ u, data=tbl, span=myspan)
+  tbl$lovar <- predict(lovar)
+  tbl$vadj <- tbl$v - tbl$lovar
+  tbl <- tbl %>% 
+    mutate(rank = min_rank(-vadj)) %>%
+    arrange(rank)
+  label_data <- filter(tbl, rank <= nlabel)
+  top_data <- filter(tbl, rank < ntop)
+  bot_data <- filter(tbl, rank >= ntop)
+  p <- ggplot(tbl) +
+    geom_point(data=bot_data, aes(u, v), alpha=0.5, size=1, color="#aaaaaa") +
+    geom_point(data=top_data, aes(u, v), alpha=0.8, size=2, color="#ffaaaa") +
+    geom_line(aes(u, lovar), color="blue") +
+    geom_text_repel(data=label_data, aes(u, v, label=g), color="black", size=3, max.overlaps=Inf) +
+    theme_minimal()
+  return(p)
+}
+
+heatmap_genes <- function(s, x, filename="heatmap.pdf", width=10, height=10) {
+  s <- s %>% mutate(
+    noise_quantile = ntile(desc(bg_auc), 8)
+  )
+  annot_col <- column_to_rownames(s, "aoi") %>%
+    select(patient, path_specimen, path_aoi, noise_quantile) %>%
+    as.data.frame()
+  p <- pheatmap(x,
+                scale="row",
+                show_rownames=TRUE,
+                show_colnames=FALSE,
+                border_color=NA,
+                clustering_distance_rows = "euclidean",
+                clustering_distance_cols = "euclidean",
+                clustering_method = "ward.D2",
+                # clustering_method = "average",
+                # clustering_distance_rows = "correlation",
+                # clustering_distance_cols = "correlation",
+                breaks = seq(-3, 3, 0.05),
+                color = colorRampPalette(c("purple3", "black", "yellow2"))(120),
+                annotation_col = annot_col,
+                annotation_colors = color_scales,
+                fontsize=4,
+                filename=filename,
+                width=width,
+                height=height)
+  return(p)
+}
+
 
 y <- log2_norm_cpm
 ntop <- 1000
 nlabel <- 100
 myspan <- 0.5
 
-# plot most variable genes
-tbl <- bind_cols(
-  g = rownames(y),
-  u = rowMeans(y),
-  v = apply(y, 1, function(x) var(x))
-)
-lovar <- loess(v ~ u, data=tbl, span=myspan)
-tbl$lovar <- predict(lovar)
-tbl$vadj <- abs(tbl$v - tbl$lovar)
-tbl <- tbl %>% 
-  mutate(rank = min_rank(-vadj)) %>%
-  arrange(rank)
-label_data <- filter(tbl, rank <= nlabel)
-
-p <- ggplot(tbl) +
-  geom_point(aes(u, v), alpha=0.5, color="#ffaaaa") +
-  geom_line(aes(u, lovar), color="blue") +
-  geom_text_repel(data=label_data, aes(u, v, label=g), color="black", size=3, max.overlaps=Inf) +
-  theme_minimal()
+# maplot
+p <- maplot(log2_norm_cpm, ntop=ntop, nlabel=nlabel, myspan=myspan)
 f <- file.path(plot_dir, paste0("maplot"))
 ggsave(paste0(f, ".pdf"), plot=p, width=10, height=10)
 ggsave(paste0(f, ".png"), plot=p, width=10, height=10)
 
 # select most variable genes
+ntop <- 500
+myspan <- 0.5
+s <- fds$samples
 y <- most_var_genes(log2_norm_cpm, ntop=ntop, span=myspan)
 
-s <- fds$samples %>% mutate(
-  noise_quantile = ntile(desc(bg_auc), 8)
-)
-
-annot_col <- column_to_rownames(s, "aoi") %>% 
-  select(patient, path_specimen, path_aoi, noise_quantile) %>%
-  as.data.frame()
-
-f <- file.path(plot_dir, "heatmap_cluster_highvar_genes")
-w <- 12
-h <- 12
-p <- pheatmap(y,
-              scale="row",
-              show_rownames=FALSE,
-              show_colnames=FALSE,
-              border_color=NA,
-              clustering_method = "average",
-              clustering_distance_rows = "correlation",
-              clustering_distance_cols = "correlation",
-              breaks = seq(-3, 3, 0.05),
-              color = colorRampPalette(c("purple3", "black", "yellow2"))(120),
-              annotation_col = annot_col,
-              annotation_colors = color_scales,
-              filename=paste0(f, ".png"), width=w, height=h)
-save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
+# heatmap
+f <- file.path(plot_dir, "heatmap_highvar_genes.pdf")
+p <- heatmap_genes(s, y, f)
 
 
 ```
@@ -697,40 +726,84 @@ width <- 4
 height <- 3
 
 # PCA
-res.pca <- prcomp(t(y), center=TRUE, scale.=TRUE)
-res.pca_var <- round(100 * res.pca$sdev^2 / sum( res.pca$sdev^2 ), 2)
-res.pca_var_txt <- paste(colnames(res.pca$x), " (", paste(as.character(res.pca_var), "%", ")", sep=""), sep="")
+npcs <- 50
+pca_res <- prcomp(t(y), center=TRUE, scale.=FALSE, rank.=npcs)
+#pca_res <- prcomp(t(y), center=TRUE, scale.=TRUE)
+pca_res.var <- round(100 * pca_res$sdev^2 / sum( pca_res$sdev^2 ), 2)
+pca_res.var_txt <- paste(colnames(pca_res$x), " (", paste(as.character(pca_res.var), "%", ")", sep=""), sep="")
 
 # fviz plots
 fviz_ntop <- 50
 
 # percent variance of each PC
-p <- fviz_eig(res.pca, col.var="blue", addlabels=TRUE)
+p <- fviz_eig(pca_res, col.var="blue", addlabels=TRUE)
 f <- file.path(plot_dir, paste0("pca_fviz_eig.pdf"))
 ggsave(f, p)
 
-# contributions of variables to PC1 and PC2
-p <- fviz_contrib(res.pca, choice="var", axes = 1:2, top=fviz_ntop) +
+# contributions of variables to each PC
+p <- fviz_contrib(pca_res, choice="var", axes=1, top=fviz_ntop) +
   theme(axis.text.x = element_text(angle=90))
-f <- file.path(plot_dir, paste0("pca_fviz_contrib.pdf"))
+f <- file.path(plot_dir, paste0("pca_fviz_contrib1.pdf"))
+ggsave(f, p)
+
+p <- fviz_contrib(pca_res, choice="var", axes=2, top=fviz_ntop) +
+  theme(axis.text.x = element_text(angle=90))
+f <- file.path(plot_dir, paste0("pca_fviz_contrib2.pdf"))
+ggsave(f, p)
+
+p <- fviz_contrib(pca_res, choice="var", axes=3, top=fviz_ntop) +
+  theme(axis.text.x = element_text(angle=90))
+f <- file.path(plot_dir, paste0("pca_fviz_contrib3.pdf"))
+ggsave(f, p)
+
+# contribution to first 3 PCs
+p <- fviz_contrib(pca_res, choice="var", axes = 1:3, top=fviz_ntop) +
+  theme(axis.text.x = element_text(angle=90))
+f <- file.path(plot_dir, paste0("pca_fviz_contrib123.pdf"))
 ggsave(f, p)
 
 # graph of variables contributing to PCA
 p <- fviz_pca_var(
-  res.pca,
+  pca_res,
+  axes = c(1,2),
   col.var = "contrib", # Color by the quality of representation
   gradient.cols = c("darkorchid4", "gold", "darkorange"),
   repel=TRUE,
   select.var = list(contrib=fviz_ntop)
 )
-f <- file.path(plot_dir, paste0("pca_fviz_pca_var.pdf"))
+f <- file.path(plot_dir, paste0("pca_fviz_pca_var_pc12.pdf"))
 ggsave(f, p, width=7, height=7)
+
+# graph of variables contributing to PCA
+p <- fviz_pca_var(
+  pca_res,
+  axes = c(1,3),
+  col.var = "contrib", # Color by the quality of representation
+  gradient.cols = c("darkorchid4", "gold", "darkorange"),
+  repel=TRUE,
+  select.var = list(contrib=fviz_ntop)
+)
+f <- file.path(plot_dir, paste0("pca_fviz_pca_var_pc13.pdf"))
+ggsave(f, p, width=7, height=7)
+
+# graph of variables contributing to PCA
+p <- fviz_pca_var(
+  pca_res,
+  axes = c(2,3),
+  col.var = "contrib", # Color by the quality of representation
+  gradient.cols = c("darkorchid4", "gold", "darkorange"),
+  repel=TRUE,
+  select.var = list(contrib=fviz_ntop)
+)
+f <- file.path(plot_dir, paste0("pca_fviz_pca_var_pc23.pdf"))
+ggsave(f, p, width=7, height=7)
+
 
 
 #
 # PCA plots
 #
-x <- bind_cols(s, as_tibble(res.pca$x))
+x <- bind_cols(s, as_tibble(pca_res$x))
 
 # bg_ks_dist
 p <- ggplot(x, aes(x=PC1, y=PC2, color=bg_auc)) +
@@ -738,17 +811,19 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=bg_auc)) +
   scale_color_viridis_c() +
   theme_bw() +
   theme(aspect.ratio=1) +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+  theme(legend.text = element_text(size=7)) +
+  labs(x=pca_res.var_txt[1], y=pca_res.var_txt[2])
 f <- file.path(plot_dir, paste0("pca_bg_auc.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
 
 # patient
 p <- ggplot(x, aes(x=PC1, y=PC2, color=patient, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
-  scale_color_manual(values = pals::cols25()) +
+  scale_color_manual(values = color_scales$patient) +
   theme_bw() +
   theme(aspect.ratio=1) +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+  theme(legend.text = element_text(size=7)) +
+  labs(x=pca_res.var_txt[1], y=pca_res.var_txt[2])
 f <- file.path(plot_dir, paste0("pca_patient.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
 
@@ -758,7 +833,8 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=path_specimen, shape=path_specimen)) +
   scale_color_manual(values=color_scales$path_specimen) +
   theme_bw() +
   theme(aspect.ratio=1) +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+  theme(legend.text = element_text(size=7)) +
+  labs(x=pca_res.var_txt[1], y=pca_res.var_txt[2])
 f <- file.path(plot_dir, paste0("pca_path_specimen.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
 
@@ -768,7 +844,8 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen)) +
   scale_color_manual(values=color_scales$path_aoi) +
   theme_bw() +
   theme(aspect.ratio=1) +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+  theme(legend.text = element_text(size=7)) +
+  labs(x=pca_res.var_txt[1], y=pca_res.var_txt[2])
 f <- file.path(plot_dir, paste0("pca_path_aoi.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
 
@@ -778,51 +855,66 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=path, shape=path_specimen)) +
   scale_color_manual(values=color_scales$path) +
   theme_bw() +
   theme(aspect.ratio=1) +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+  theme(legend.text = element_text(size=7)) +
+  labs(x=pca_res.var_txt[1], y=pca_res.var_txt[2])
 f <- file.path(plot_dir, paste0("pca_path.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
 
 
-#
-# plots of PC1, PC2, and PC3
-#
-# patient
-p1 <- ggplot(x, aes(x=PC1, y=PC2, color=patient, shape=path_specimen)) +
-  geom_point(alpha = 0.8, size=3) +
-  scale_color_manual(values = pals::cols25()) +
-  theme_bw() +
-  theme(aspect.ratio=1) +
-  theme(legend.position="none") +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
-p2 <- ggplot(x, aes(x=PC3, y=PC2, color=patient, shape=path_specimen)) +
-  geom_point(alpha = 0.8, size=3) +
-  scale_color_manual(values = pals::cols25()) +
-  theme_bw() +
-  theme(aspect.ratio=1) +
-  labs(x=res.pca_var_txt[3], y=res.pca_var_txt[2])
-p <- p1 + p2
-f <- file.path(plot_dir, paste0("pca_patient_12_23.pdf"))
-ggsave(f, plot=p, device="pdf", width=7, height=3)
 
 #
-# path
+# Plots of PC1, PC2, and PC3
 #
-p1 <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen)) +
-  geom_point(alpha = 0.8, size=3) +
-  scale_color_manual(values = color_scales$path_aoi) +
-  theme_bw() +
-  theme(aspect.ratio=1) +
-  theme(legend.position="none") +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
-p2 <- ggplot(x, aes(x=PC3, y=PC2, color=path_aoi, shape=path_specimen)) +
-  geom_point(alpha = 0.8, size=3) +
-  scale_color_manual(values = color_scales$path_aoi) +
-  theme_bw() +
-  theme(aspect.ratio=1) +
-  labs(x=res.pca_var_txt[3], y=res.pca_var_txt[2])
-p <- p1 + p2
-f <- file.path(plot_dir, paste0("pca_path_aoi_12_23.pdf"))
-ggsave(f, plot=p, device="pdf", width=7, height=3)
+pca_plot <- function(x, xvar, yvar, color_by, shape_by) {
+  color_by_string <- rlang::as_string(rlang::ensym(color_by))
+  shape_by_string <- rlang::as_string(rlang::ensym(shape_by))
+  
+  if (is.character(pull(x, {{color_by}}))) {
+    scale_color_func <- scale_color_manual(values = color_scales[[color_by_string]])
+  } else {
+    scale_color_func <- scale_color_viridis_c()
+  }
+
+  p <- ggplot(x, aes(x={{xvar}}, y={{yvar}}, color={{color_by}}, shape={{shape_by}})) +
+    geom_point(alpha = 0.8, size=3) +
+    scale_color_func +
+    #scale_color_manual(values = color_scales[[color_by_string]]) +
+    scale_shape_manual(values = shape_scales[[shape_by_string]]) +
+    theme_bw() +
+    theme(aspect.ratio=1,
+          legend.text = element_text(size=7))
+    # coord_fixed() +
+  return(p)
+}
+
+
+# bg_auc
+p12 <- pca_plot(x, PC1, PC2, bg_auc, path_specimen)
+p13 <- pca_plot(x, PC1, PC3, bg_auc, path_specimen)
+p23 <- pca_plot(x, PC2, PC3, bg_auc, path_specimen)
+p <- p12 + p13 + p23 + 
+  plot_layout(guides = "collect")
+f <- file.path(plot_dir, paste0("pca_bg_auc_pc123.pdf"))
+ggsave(f, plot=p, device="pdf", width=12, height=6)
+
+# path aoi
+p12 <- pca_plot(x, PC1, PC2, path_aoi, path_specimen)
+p13 <- pca_plot(x, PC1, PC3, path_aoi, path_specimen)
+p23 <- pca_plot(x, PC2, PC3, path_aoi, path_specimen)
+p <- p12 + p13 + p23 + 
+  plot_layout(guides = "collect")
+f <- file.path(plot_dir, paste0("pca_path_aoi_pc123.pdf"))
+ggsave(f, plot=p, device="pdf", width=12, height=6)
+
+# patient
+p12 <- pca_plot(x, PC1, PC2, patient, path_specimen)
+p13 <- pca_plot(x, PC1, PC3, patient, path_specimen)
+p23 <- pca_plot(x, PC2, PC3, patient, path_specimen)
+p <- p12 + p13 + p23 + 
+  plot_layout(guides = "collect")
+f <- file.path(plot_dir, paste0("pca_patient_pc123.pdf"))
+ggsave(f, plot=p, device="pdf", width=12, height=6)
+
 
 ```
 
@@ -834,26 +926,35 @@ ggsave(f, plot=p, device="pdf", width=7, height=3)
 # guide: https://rpubs.com/KarolinaSzczesna/862710
 # guide: https://rpubs.com/Bury/ClusteringOnPcaResults
 
-# scree plot: percent variance of each PC
-p <- fviz_eig(res.pca, col.var="blue", addlabels=TRUE)
-f <- file.path(plot_dir, paste0("pca_fviz_eig.pdf"))
-ggsave(f, plot=p, device="pdf", width=4, height=4)
+# npcs
+npcs <- 3
 
 # choose number of clusters
-p <- fviz_nbclust(res.pca$x, FUNcluster=hcut, method="silhouette")
-f <- file.path(plot_dir, paste0("pca_fviz_nbclust.pdf"))
+# x <- pca_res$x[,1:npcs]
+x <- pca_res$x
+
+p <- fviz_nbclust(x, FUNcluster=cluster::pam, method="silhouette")
+f <- file.path(plot_dir, paste0("pca_fviz_nbclust_silhouette.pdf"))
 ggsave(f, plot=p, device="pdf", width=4, height=4)
+
+# p <- fviz_nbclust(x, FUNcluster=cluster::pam, method="wss")
+# f <- file.path(plot_dir, paste0("pca_fviz_nbclust_wss.pdf"))
+# ggsave(f, plot=p, device="pdf", width=4, height=4)
+# 
+# p <- fviz_nbclust(x, FUNcluster=cluster::pam, method="gap_stat", nboot=100)
+# f <- file.path(plot_dir, paste0("pca_fviz_nbclust_gapstat.pdf"))
+# ggsave(f, plot=p, device="pdf", width=4, height=4)
 
 # set number of clusters
 nclusters <- 3
 
 # commented out: hierarchical clustering based on first two PCs
-x <- res.pca$x[,1:2]
-d <- dist(x)
-#hc <- hclust(d, method="complete")
-hc <- hclust(d, method="ward.D2")
-memb <- cutree(hc, k=nclusters)
-memb <- paste0("c", memb)
+# x <- pca_res$x[, npcs]
+# d <- dist(x)
+# #hc <- hclust(d, method="complete")
+# hc <- hclust(d, method="ward.D2")
+# memb <- cutree(hc, k=nclusters)
+# memb <- paste0("c", memb)
 
 # commented out: decided to use hierarchical clustering
 # kmeans clustering based on PCs
@@ -861,7 +962,7 @@ memb <- paste0("c", memb)
 #memb <- paste0("c", km$cluster)
 
 # pam
-x <- res.pca$x[,1:2]
+x <- pca_res$x[,1:npcs]
 d <- dist(x)
 pamx <- cluster::pam(d, k=3)
 memb <- paste0("c", pamx$clustering)
@@ -870,20 +971,54 @@ memb <- paste0("c", pamx$clustering)
 fds$samples$cluster <- memb
 
 # plot clustering
-x <- bind_cols(fds$samples, as_tibble(res.pca$x))
+x <- bind_cols(fds$samples, as_tibble(pca_res$x))
 
 # cluster
 p1 <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values = color_scales$path_aoi) +
   theme_bw() +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+  labs(x=pca_res.var_txt[1], y=pca_res.var_txt[2])
 p2 <- ggplot(x, aes(x=PC1, y=PC2, color=cluster, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values = color_scales$cluster) +
   theme_bw() +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+  labs(x=pca_res.var_txt[1], y=pca_res.var_txt[2])
 p1 + p2
+
+
+
+
+
+# set number of clusters
+nclusters <- 5
+
+# pam
+x <- pca_res$x[,1:npcs]
+pamx <- cluster::pam(dist(x), k=nclusters)
+memb <- paste0("c", pamx$clustering)
+
+# add cluster membership to sample properties
+fds$samples$cluster <- memb
+
+# plot clustering
+x <- bind_cols(fds$samples, as_tibble(pca_res$x))
+
+# pca plot clustering
+p12 <- pca_plot(x, PC1, PC2, cluster, path_specimen)
+p13 <- pca_plot(x, PC1, PC3, cluster, path_specimen)
+p23 <- pca_plot(x, PC2, PC3, cluster, path_specimen)
+p <- p12 + p13 + p23 +
+  plot_layout(guides = "collect")
+f <- file.path(plot_dir, paste0("pca_cluster_pc123.pdf"))
+ggsave(f, plot=p, device="pdf", width=12, height=6)
+
+
+
+
+
+
+
 
 
 #
@@ -894,7 +1029,7 @@ fds$samples <- fds$samples %>% mutate(
                            cluster == "c2" ~ "cHR",
                            cluster == "c3" ~ "cNL")
 )
-x <- bind_cols(fds$samples, as_tibble(res.pca$x))
+x <- bind_cols(fds$samples, as_tibble(pca_res$x))
 
 #
 # single multipanel plot for figure
@@ -906,7 +1041,7 @@ p1 <- ggplot(x, aes(x=PC1, y=PC2, color=path_specimen, shape=path_specimen)) +
 #  coord_fixed() +
   theme_bw() +
   theme(aspect.ratio=1) +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+  labs(x=pca_res.var_txt[1], y=pca_res.var_txt[2])
 
 # path aoi
 p2 <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen)) +
@@ -915,7 +1050,7 @@ p2 <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen)) +
 #  coord_fixed() +
   theme_bw() +
   theme(aspect.ratio=1) +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+  labs(x=pca_res.var_txt[1], y=pca_res.var_txt[2])
 
 # cluster
 p3 <- ggplot(x, aes(x=PC1, y=PC2, color=cluster_name, shape=path_specimen)) +
@@ -924,7 +1059,7 @@ p3 <- ggplot(x, aes(x=PC1, y=PC2, color=cluster_name, shape=path_specimen)) +
 #  coord_fixed() +
   theme_bw() +
   theme(aspect.ratio=1) +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+  labs(x=pca_res.var_txt[1], y=pca_res.var_txt[2])
 
 # patient
 p4 <- ggplot(x, aes(x=PC1, y=PC2, color=patient, shape=path_specimen)) +
@@ -933,7 +1068,7 @@ p4 <- ggplot(x, aes(x=PC1, y=PC2, color=patient, shape=path_specimen)) +
 #  coord_fixed() +
   theme_bw() +
   theme(aspect.ratio=1) +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+  labs(x=pca_res.var_txt[1], y=pca_res.var_txt[2])
 
 p <- p1 + p2 + p3 + p4 + plot_layout(nrow=1)
 f <- file.path(plot_dir, paste0("pca_panel_plots.pdf"))
@@ -953,17 +1088,17 @@ p1 <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values = color_scales$path_aoi) +
   theme_bw() +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+  labs(x=pca_res.var_txt[1], y=pca_res.var_txt[2])
 p2 <- ggplot(x, aes(x=PC3, y=PC2, color=path_aoi, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values = color_scales$path_aoi) +
   theme_bw() +
-  labs(x=res.pca_var_txt[3], y=res.pca_var_txt[2])
+  labs(x=pca_res.var_txt[3], y=pca_res.var_txt[2])
 p3 <- ggplot(x, aes(x=PC3, y=PC4, color=path_aoi, shape=path_specimen)) +
   geom_point(alpha = 0.8, size=3) +
   scale_color_manual(values = color_scales$path_aoi) +
   theme_bw() +
-  labs(x=res.pca_var_txt[3], y=res.pca_var_txt[4])
+  labs(x=pca_res.var_txt[3], y=pca_res.var_txt[4])
 p1 + p2 + p3
 
 
@@ -1431,7 +1566,7 @@ y <- log2_norm_cpm
 
 for (gene in cluster_marker_genes) {
   print(gene)
-  x <- bind_cols(s, as_tibble(res.pca$x), gene=unlist(y[gene,]))
+  x <- bind_cols(s, as_tibble(pca_res$x), gene=unlist(y[gene,]))
   p <- ggplot(x, aes(x=PC1, y=PC2, color=gene, shape=path_specimen)) +
     geom_point(alpha = 0.8, size=3) +
     scale_color_viridis_c() +
@@ -2507,7 +2642,7 @@ s <- fds$samples
 y <- log2_norm_cpm
 x <- as_tibble(gsva_res[gene_sets,], rownames="pathway") %>%
   pivot_longer(cols = !pathway, names_to="aoi")
-x <- left_join(x, bind_cols(fds$samples, as_tibble(res.pca$x)), by=join_by(aoi == aoi))
+x <- left_join(x, bind_cols(fds$samples, as_tibble(pca_res$x)), by=join_by(aoi == aoi))
 x$path <- factor(x$path, levels=c("ipmn_lgd_nl_epithelial", "ipmn_lgd_lgd_epithelial",
                                   "ipmn_inv_nl_epithelial", "ipmn_inv_lgd_epithelial",
                                   "ipmn_inv_hgd_epithelial", "ipmn_inv_inv_epithelial"))
@@ -2589,7 +2724,7 @@ s <- fds$samples
 y <- log2_norm_cpm
 x <- as_tibble(gsva_res[gene_sets,], rownames="pathway") %>%
   pivot_longer(cols = !pathway, names_to="aoi")
-x <- left_join(x, bind_cols(fds$samples, as_tibble(res.pca$x)), by=join_by(aoi == aoi))
+x <- left_join(x, bind_cols(fds$samples, as_tibble(pca_res$x)), by=join_by(aoi == aoi))
 x$path <- factor(x$path, levels=c("ipmn_lgd_nl_epithelial", "ipmn_lgd_lgd_epithelial",
                                   "ipmn_inv_nl_epithelial", "ipmn_inv_lgd_epithelial",
                                   "ipmn_inv_hgd_epithelial", "ipmn_inv_inv_epithelial"))
@@ -2699,7 +2834,7 @@ gene_sets <- c("Moffitt.F3_Exocrine.top250",
                "Moffitt.F6_BasalLike.top250")
 pc_names <- c("PC1", "PC2")
 
-x <- bind_cols(fds$samples, as_tibble(res.pca$x), t(gsva_res))
+x <- bind_cols(fds$samples, as_tibble(pca_res$x), t(gsva_res))
 x <- x %>% select(aoi, path_specimen, path_aoi, cluster_name, all_of(pc_names), all_of(gene_sets))
 
 coefs <- matrix(nrow=length(pc_names), ncol=length(gene_sets), dimnames=list(pc_names, gene_sets))
@@ -3599,20 +3734,23 @@ plot_gene2 <- function(s, x, gene, aes_x, aes_color) {
 s <- fds$samples %>% filter(path_aoi %in% c("nl","lgd"))
 y <- log2_norm_cpm[, s$aoi]
 
+
+s <- fds$samples
+y <- log2_norm_cpm
+
 genes <- c("OLFM4", "MALL", "TNS4", "CLDN4", "DUOX2")
 
 w <- 5
 h <- 4
 
 
-g <- "OLFM4"
+g <- "PIKFYVE"
 
 x <- s %>% add_column(gene = y[g,])
-p <- ggplot(x, aes(x=path_specimen, y=gene, fill=cluster_name)) +
+p <- ggplot(x, aes(x=cluster_name, y=gene, fill=cluster_name)) +
   geom_boxplot(outlier.shape=NA, width=0.75) +
   geom_point(aes(group=cluster_name),
-             position=position_jitterdodge(jitter.width=0.1)) + 
-  facet_wrap(~patient)
+             position=position_jitterdodge(jitter.width=0.1))
 
 
 p <- ggplot(x, aes(x={{ aes_x }}, y=gene, fill={{aes_color}})) +
@@ -3675,7 +3813,7 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen, alpha=path
   scale_alpha_manual(values=alpha_aoi) +
   scale_color_manual(values=color_scales$path_aoi) +
   theme_bw() +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+  labs(x=pca_res.var_txt[1], y=pca_res.var_txt[2])
 f <- file.path(plot_dir, paste0("pca_path_aoi_nllgd.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
 
@@ -3684,7 +3822,7 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=cluster_name, shape=path_specimen, alpha=
   scale_alpha_manual(values=alpha_aoi) +
   scale_color_manual(values=color_scales$cluster_name) +
   theme_bw() +
-  labs(x=res.pca_var_txt[1], y=res.pca_var_txt[2])
+  labs(x=pca_res.var_txt[1], y=pca_res.var_txt[2])
 f <- file.path(plot_dir, paste0("pca_path_cluster_nllgd.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
 
