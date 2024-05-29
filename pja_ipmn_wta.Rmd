@@ -1,5 +1,6 @@
 ---
-title: "pja_ipmn_wta"
+title: "Spatial Transcriptomics of IPMN Reveals Divergent Indolent and Malignant Progenitor Phenotypes"
+author: Matthew K. Iyer
 output: rmarkdown::html_vignette
 vignette: >
   %\VignetteIndexEntry{pja_ipmn_wta}
@@ -22,11 +23,9 @@ library(readxl)
 library(writexl)
 library(patchwork)
 library(ggrepel)
-library(ggridges)
-library(plotly)
+library(pROC)
 
 # bioinformatics packages
-library(umap)
 library(pheatmap)
 
 # bioconductor packages
@@ -35,20 +34,15 @@ library(limma)
 library(fgsea)
 library(GSVA)
 
-# link to stgeomx
-library(devtools)
-stgeomx_path <- '/Users/mkiyer/proj/stgeomx'
-devtools::load_all(path=stgeomx_path)
-library(stgeomx)
-
 ```
+
 
 ## Input files and parameter settings
 
 ```{r input files, include=FALSE}
 
-# master directory
-working_dir <- "/Users/mkiyer/Dropbox (University of Michigan)/manuscripts/aso_stgeomx_ipmn_wta/analysis"
+# set to location of manuscript files
+working_dir <- "/Users/mkiyer/Dropbox (University of Michigan)/manuscripts/duke_stgeomx_ipmn_wta/analysis"
 
 # input directories
 geomx_dir <- file.path(working_dir, "geomx")
@@ -138,9 +132,737 @@ shape_scales <- list(
 
 ```
 
-## Helper functions
+# Functions
 
-```{r helper functions}
+## stgeomx package code
+
+```{r stgeomx}
+
+stgeomx_init <- function(samples, meta, counts, x) {
+  ds <- list(
+    samples = samples,
+    meta = meta,
+    counts = counts,
+    x = x
+  )
+  class(ds) <- "stgeomx"
+  return(ds)
+}
+
+
+stgeomx_copy <- function(ds) {
+  x <- list(
+    samples = ds$samples,
+    meta = ds$meta,
+    counts = ds$counts,
+    x = ds$x
+  )
+  class(x) <- "stgeomx"
+  return(x)
+}
+
+
+stgeomx_prepare_input <- function(samples, counts,
+                          slide_key_col,
+                          roi_key_col,
+                          segment_key_col,
+                          aoi_key_col,
+                          probe_key_col,
+                          gene_key_col,
+                          negprobe_regex) {
+  # ensure all samples found in counts
+  inds <- match(pull(samples, {{ aoi_key_col }}), colnames(counts))
+  stopifnot(all(!is.na(inds)))
+
+  # break counts into metadata and count data
+  meta <- counts %>%
+    select("probe" = all_of({{ probe_key_col }}), 
+           "gene" = all_of({{ gene_key_col }})) %>%
+    mutate(bg = stringr::str_detect(.data$gene, negprobe_regex), .after="gene")
+
+  # select valid samples
+  counts <- select(counts, all_of(inds))
+  # ensure samples and count tables are aligned
+  stopifnot(all(pull(samples, {{ aoi_key_col }}) == colnames(counts)))
+
+  # create new identifiers for slide, roi, segment, aoi
+  slide_keys <- pull(samples, {{ slide_key_col }})
+  samples <- samples %>% mutate(
+    slide = sprintf("s%02d", match(slide_keys, unique(slide_keys))),
+    roi = sprintf("r%s", .data[[roi_key_col]]),
+    segment = tolower(gsub(" ", "", .data[[segment_key_col]], fixed = TRUE)),
+    aoi = sprintf("%s_%s_%s", .data$slide, .data$roi, .data$segment)
+  )
+  stopifnot(n_distinct(samples$aoi) == nrow(samples))
+
+  # relabel columns of count matrix with new aoi id
+  colnames(counts) <- samples$aoi
+  stopifnot(all(samples$aoi == colnames(counts)))
+
+  # create dataset
+  ds <- stgeomx_init(samples, meta, counts, counts)
+  return(ds)
+}
+
+
+stgeomx_read_xlsx <- function(xlsx_file,
+                      sample_sheet = "SegmentProperties",
+                      count_sheet = "BioProbeCountMatrix",
+                      slide_key_col = "ScanLabel",
+                      roi_key_col = "ROILabel",
+                      segment_key_col = "SegmentLabel",
+                      aoi_key_col = "SegmentDisplayName",
+                      probe_key_col = "ProbeDisplayName",
+                      gene_key_col = "TargetName",
+                      negprobe_regex = "^NegProbe") {
+  # read samples (remove duplicates based on aoi key)
+  samples <- readxl::read_excel(xlsx_file, sheet=sample_sheet,
+                                na = c("", "NaN")) %>%
+    distinct(.data[[aoi_key_col]], .keep_all=TRUE)
+
+  # read counts
+  counts <- readxl::read_excel(xlsx_file, sheet=count_sheet,
+                               .name_repair = "minimal")
+
+  # prepare dataset
+  ds <- stgeomx_prepare_input(samples, counts, slide_key_col, roi_key_col,
+                      segment_key_col, aoi_key_col, probe_key_col,
+                      gene_key_col, negprobe_regex)
+  return(ds)
+}
+
+
+geomean <- function(x) {
+  return(exp(mean(log(x))))
+}
+
+
+compute_quantiles_kde <- function(x, bg, bw.adjust=2) {
+  # setup
+  n <- 2^13
+  xlog <- log2(x+1)
+  xmin <- 0
+  xbgmax <- max(xlog[bg])
+  # select bandwidth
+  bwbg <- stats::bw.nrd0(xlog[bg]) * bw.adjust
+  # smooth ecdf functions for neg probes
+  dbg <- stats::density(xlog[bg], bw=bwbg, n=n, from=0, to=xbgmax)
+  dbgcdf <- cumsum(dbg$y) / sum(dbg$y)
+  # find bg quantiles
+  q <- stats::approx(dbg$x, dbgcdf, xout=xlog,
+                     yleft=0, yright=1, rule=2, ties="ordered")$y
+  return(q)
+}
+
+
+calc_bg_quantiles <- function(ds) {
+  # calculate probe quantiles relative to negative probes
+  bg_quants <- bind_cols(select(ds$meta, "bg"), ds$counts) %>%
+    reframe(across(-"bg", ~ compute_quantiles_kde(.x, .data$bg)))
+  return(bg_quants)
+}
+
+
+remove_empty_aois <- function(ds, min_count = 1) {
+  # initial filter of "empty" samples with essential zero counts
+  count_max = apply(ds$counts, 2, max)
+  keep <- count_max > min_count
+  fds <- stgeomx_init(
+    samples = filter(ds$samples, keep),
+    meta = ds$meta,
+    counts = ds$counts[, keep],
+    x = ds$x[, keep]
+  )
+  return(fds)
+}
+
+
+calc_qc_metrics <- function(samples, meta, counts, bg_lod_quantile) {
+  # unpack dataset for readability
+  bg <- meta$bg
+  x <- counts[!bg, ]
+  xbg <- counts[bg, ]
+
+  # add background metrics
+  samples <- samples %>% mutate(
+    bg_counts = colSums(xbg),
+    bg_cpm = 1e6 * colSums(xbg) / colSums(counts),
+    bg_geomean = apply(xbg, 2, geomean),
+    bg_median = apply(xbg, 2, stats::median),
+    bg_q3 = apply(xbg, 2, stats::quantile, 0.75),
+    bg_q95 = apply(xbg, 2, stats::quantile, 0.95),
+    bg_max = apply(xbg, 2, max),
+    bg_lod = apply(xbg, 2, stats::quantile, bg_lod_quantile)
+  )
+  # add gene metrics
+  samples <- samples %>% mutate(
+    num_counts = colSums(x),
+    complexity = apply(x, 2, function(x) length(unique(x))),
+    count_mad = apply(x, 2, stats::mad),
+    count_iqr = apply(x, 2, stats::IQR),
+    count_geomean = apply(x, 2, geomean),
+    count_median = apply(x, 2, stats::median),
+    count_q3 = apply(x, 2, stats::quantile, 0.75),
+    count_q95 = apply(x, 2, stats::quantile, 0.95),
+    count_max = apply(x, 2, max)
+  )
+  # gene probe vs background probe metrics (signal-to-noise)
+  samples <- samples %>% mutate(
+    snr_geomean = .data$count_geomean / .data$bg_geomean,
+    snr_median = .data$count_median / .data$bg_median,
+    snr_q3 = .data$count_q3 / .data$bg_q3,
+    snr_q95 = .data$count_q95 / .data$bg_q95
+  )
+  return(samples)
+}
+
+
+calc_frac_expr <- function(counts, bg, bg_lod) {
+  x <- sweep(counts, 2, bg_lod, FUN="-")
+  x <- apply(x, 2, pmax, 0)
+  x <- x > 0
+  gene_frac_expr <- rowSums(x) / ncol(x)
+  y <- x[bg == FALSE,]
+  sample_frac_expr <- colSums(y) / nrow(y)
+  return(list(s=sample_frac_expr, g=gene_frac_expr))
+}
+
+
+calc_snauc <- function(meta, counts) {
+  # calculate AUC of gene vs background (negative probe)
+  calc_roi_auc <- function(responses, predictors) {
+    myroc <- pROC::roc(responses, predictors, levels=c(TRUE, FALSE), direction="<")
+    myauc <- as.numeric(myroc$auc)
+    return(myauc)
+  }
+  bg_auc <- bind_cols(select(meta, "bg"), counts) %>%
+    summarize(across(-"bg", ~ calc_roi_auc(.data$bg, .x))) %>%
+    unlist()
+  return(bg_auc)
+}
+
+
+stgeomx_preprocess <- function(ds, bg_lod_quantile=0.9) {
+  # first remove empty/control AOIs
+  ds <- remove_empty_aois(ds)
+
+  # unpack dataset
+  samples <- ds$samples
+  meta <- ds$meta
+  bg <- meta$bg
+  counts <- ds$counts
+
+  # if dataset is 1-based, convert to 0-based for consistency
+  if (min(ds$counts) > 0) {
+    counts <- counts - 1
+  }
+
+  # compute basic qc metrics (returns sample table)
+  samples <- calc_qc_metrics(samples, meta, counts, bg_lod_quantile)
+
+  # separate bg and gene counts
+  x <- counts[!bg, ]
+  xbg <- counts[bg, ]
+
+  # probes expressed over detection limit
+  x <- calc_frac_expr(counts, bg, samples$bg_lod)
+  samples$frac_expr <- x$s
+  meta$frac_expr <- x$g
+
+  # calculate AUC of gene vs background (negative probe)
+  samples$bg_auc <- calc_snauc(meta, counts)
+
+  # KS test of gene vs background
+  bg_ks_dist <- NULL
+  bg_ks_pval <- NULL
+  for (i in 1:ncol(counts)) {
+    x <- unlist(counts[!bg, i])
+    xbg <- unlist(counts[bg, i])
+    res <- suppressWarnings(stats::ks.test(x, xbg, alternative="less"))
+    bg_ks_dist[i] <- res$statistic
+    bg_ks_pval[i] <- res$p.value
+  }
+  samples <- mutate(samples,
+    bg_ks_dist = bg_ks_dist,
+    bg_ks_pval = bg_ks_pval
+  )
+
+  # filtering defaults
+  samples$keep <- TRUE
+  meta$keep <- TRUE
+
+  ds <- stgeomx_init(
+    samples = samples,
+    meta = meta,
+    counts = counts,
+    x = counts
+  )
+  return(ds)
+}
+
+
+stgeomx_merge_probes <- function(ds) {
+  # convenience function for geomean
+  geomean_fast <- function(x) {
+    ifelse(length(x) == 1, x, 2^(mean(log2(x+1))))
+  }
+
+  # do not merge the negative probes, instead just move the probe name
+  # to the gene name
+  ybg <- bind_cols(ds$meta, ds$counts) %>%
+    filter(.data$bg) %>%
+    rowwise() %>%
+    summarize(
+      gene = .data$probe,
+      num_probes = 1,
+      probes = .data$probe,
+      bg = TRUE,
+      frac_expr = .data$frac_expr,
+      across(colnames(ds$counts), geomean_fast)
+    )
+  bgmeta <- ybg %>% select(-colnames(ds$counts))
+  bgcounts <- ybg %>% select(colnames(ds$counts))
+
+  # merge gene probes
+  y <- bind_cols(ds$meta, ds$counts) %>%
+    filter(!.data$bg) %>%
+    group_by(.data$gene) %>%
+    summarize(
+      num_probes = n(),
+      probes = stringr::str_flatten(.data$probe, collapse=","),
+      bg = FALSE,
+      frac_expr = mean(.data$frac_expr),
+      across(colnames(ds$counts), geomean_fast)
+    )
+  meta <- y %>% select(-colnames(ds$counts))
+  counts <- y %>% select(colnames(ds$counts))
+
+  ds <- stgeomx_init(
+    samples = ds$samples,
+    meta = bind_rows(meta, bgmeta),
+    counts = bind_rows(counts, bgcounts),
+    x = bind_rows(counts, bgcounts)
+  )
+  return(ds)
+}
+
+
+
+stgeomx_set_thresholds <- function(ds,
+                           min_counts = 0,
+                           min_auc = 0.5,
+                           aoi_min_frac_expr = 0.0,
+                           gene_min_frac_expr = 0.0) {
+  # apply filtering parameters to samples
+  ds$samples <- ds$samples %>% mutate(
+    keep = ((.data$num_counts > min_counts) &
+              (.data$bg_auc > min_auc) &
+              (.data$frac_expr > aoi_min_frac_expr))
+  )
+  # apply filtering parameters to genes
+  ds$meta <- ds$meta %>% mutate(
+    keep = .data$frac_expr > gene_min_frac_expr,
+    expressed = case_when(.data$bg ~ "bg",
+                          !(.data$keep) ~ "no",
+                          TRUE ~ "yes")
+  )
+  return(ds)
+}
+
+
+stgeomx_apply_filters <- function(ds) {
+  keep_genes <- ds$meta$keep & (!ds$meta$bg)
+  fds <- stgeomx_init(
+    samples = filter(ds$samples, .data$keep),
+    meta = filter(ds$meta, keep_genes),
+    counts = ds$counts[keep_genes, ds$samples$keep],
+    x = ds$x[keep_genes, ds$samples$keep]
+  )
+  return(fds)
+}
+
+
+stgeomx_plot_aoi_filter <- function(ds,
+                            min_counts=0,
+                            min_auc=0.5,
+                            min_frac_expr=0) {
+  # apply cutoffs
+  s <- ds$samples %>% mutate(
+    keep = ((.data$num_counts > min_counts) &
+              (.data$bg_auc > min_auc) &
+              (.data$frac_expr > min_frac_expr))
+  )
+
+  keep_aois <- table(s$keep)
+  keep_pct <- 100 * keep_aois["TRUE"] / nrow(s)
+  subtitle <- sprintf("Retained %d/%d (%.2f%%) AOIs", keep_aois["TRUE"], nrow(s), keep_pct)
+
+  p1 <- ggplot(s, aes(x=.data$num_counts+1, y=.data$frac_expr, color=.data$bg_cpm)) +
+    geom_point(alpha=0.6) +
+    geom_vline(xintercept = min_counts, linetype = "dashed", color = "red") +
+    geom_hline(yintercept = min_frac_expr, linetype = "dashed", color = "red") +
+    scale_color_viridis_c() +
+    scale_x_log10() +
+    labs(x="Counts+1", y="Frac detectable genes", color="BG CPM",
+         title="AOI QC Metrics",
+         subtitle=subtitle) +
+    theme_minimal()
+
+  p2 <- ggplot(ds$samples, aes(x=.data$num_counts+1, y=.data$bg_auc, color=.data$bg_cpm)) +
+    geom_point(alpha=0.6) +
+    geom_vline(xintercept = min_counts, linetype = "dashed", color = "red") +
+    geom_hline(yintercept = min_auc, linetype = "dashed", color = "red") +
+    scale_color_viridis_c() +
+    scale_x_log10() +
+    labs(x="Counts+1", y="snAUC", color="BG CPM") +
+    theme_minimal()
+
+  p3 <- ggplot(ds$samples, aes(x=.data$bg_auc, y=.data$frac_expr, color=.data$keep)) +
+    geom_point(alpha=0.6) +
+    geom_vline(xintercept = min_auc, linetype = "dashed", color = "red") +
+    geom_hline(yintercept = min_frac_expr, linetype = "dashed", color = "red") +
+    scale_color_manual(values = pals::cols25()) +
+    scale_x_log10() +
+    labs(x="snAUC", y="Frac detectable genes", color="QC Filter") +
+    theme_minimal()
+
+  p <- p1 + p2 + p3 + patchwork::plot_layout(guides="collect")
+  return(p)
+}
+
+
+
+stgeomx_plot_gene_filter <- function(ds, min_frac_expr=0) {
+  # apply cutoffs
+  meta <- ds$meta %>% mutate(
+    keep = .data$frac_expr > min_frac_expr,
+    expressed = case_when(.data$bg ~ "bg",
+                          !.data$keep ~ "no",
+                          TRUE ~ "yes")
+  )
+
+  # ROC curve analysis for expressed vs bg
+  myroc <- pROC::roc(meta$bg, meta$frac_expr, levels=c(TRUE, FALSE), direction="<")
+  mystats <- pROC::coords(myroc, x=min_frac_expr, input="threshold", ret="all", transpose=FALSE)
+
+  label_auc <- paste0("AUC = ", round(myroc$auc, 3))
+  label_fpr <- paste0("FPR = ", round(mystats$fpr, 3))
+  label_stats <- sprintf("Threshold=%.2f Expr=%d Filtered=%d Recall=%.2f",
+                         min_frac_expr, mystats$tp, mystats$fn, mystats$recall)
+
+  # density plot showing bg, undetectable (filtered), and detected (expressed)
+  p1 <- ggplot(meta, aes(x=.data$frac_expr, y=.data$expressed, fill=.data$expressed)) +
+    ggridges::geom_density_ridges(scale=5, alpha=0.5) +
+    #ggridges::geom_density_ridges(stat="binline", bins=50, scale=5, alpha=0.5) +
+    geom_vline(xintercept = min_frac_expr, linetype="dashed", color="red") +
+    scale_fill_manual(values = pals::cols25()) +
+    ggridges::theme_ridges() +
+    labs(x="Frac detectable above BG", y="Expressed", fill="Expressed",
+         title="Gene detection distribution",
+         subtitle=label_stats)
+
+  # threshold vs false positive rate
+  x <- pROC::coords(myroc, x="all", input="threshold", ret=c("threshold", "fpr", transpose = FALSE))
+  p2 <- ggplot(x, aes(x=.data$threshold, y=.data$fpr)) +
+    geom_line(linewidth=1, alpha=0.5, color="blue") +
+    geom_vline(xintercept = min_frac_expr, linetype="dashed", color="red") +
+    geom_hline(yintercept = mystats$fpr, linetype="dashed", color="red") +
+    #annotate("text", label=label_fpr, x=min_frac_expr, y=mystats$fpr, hjust=0, vjust=-0.25) +
+    scale_x_continuous(breaks = seq(0, 1, by=0.1)) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(color = "black", angle = 90, vjust=0.5, hjust=1, size=6)) +
+    labs(x="Frac Detectable", y="FPR", title=label_fpr)
+
+  p3 <- pROC::ggroc(myroc) +
+    geom_vline(xintercept = mystats$specificity, linetype="dashed", color="red") +
+    geom_hline(yintercept = mystats$sensitivity, linetype="dashed", color="red") +
+    theme_minimal() +
+    labs(title = label_auc)
+
+  p <- p1 / (p2 + p3)
+  return(p)
+}
+
+
+stgeomx_plot_bgcorrect <- function(ds, quantiles=c(0.10, 0.25, 0.5, 0.75, 0.90, 0.95, 0.99)) {
+  s <- select(ds$samples, "aoi", "slide", "keep")
+  x <- ds$x
+  bg <- ds$meta$bg
+
+  # compute background level per aoi
+  s$bg_cpm <- 1e6 * colSums(ds$counts[bg,]) / colSums(ds$counts)
+  # labels for plot legend
+  quant_names <- paste0("q", round(100 * quantiles))
+
+  # gene cpm before bgcorrect
+  xgene <- filter(ds$counts, !bg)
+  xgene <- as_tibble(cpm(xgene))
+  qgene <- xgene %>%
+    reframe(across(everything(), ~ stats::quantile(.x, quantiles))) %>%
+    mutate(name="gene", quant=quant_names)
+
+  # cpm after bgcorrect
+  y <- as_tibble(cpm(x[!bg, ]))
+  qy <- y %>%
+    reframe(across(everything(), ~ stats::quantile(.x, quantiles))) %>%
+    mutate(name="y", quant=quant_names)
+
+  # combine bg and gene quantiles
+  q <- bind_rows(qgene, qy) %>%
+    tidyr::pivot_longer(colnames(x), names_to="aoi", values_to="value") %>%
+    tidyr::pivot_wider(names_from="name", values_from="value", names_prefix="") %>%
+    inner_join(s, by=c("aoi"="aoi"), suffix=c("_gene", "_aoi"))
+
+  p1 <- ggplot(q, aes(x=.data$bg_cpm, y=.data$gene+1, color=.data$quant, shape=.data$keep)) +
+    geom_point(alpha=0.6) +
+    geom_smooth(data=filter(q, .data$keep), linetype='dashed', method = 'lm',
+                formula = y ~ x, se=FALSE, alpha=0.6) +
+    scale_color_viridis_d(option="plasma") +
+    scale_x_log10() +
+    scale_y_log10() +
+    theme_minimal()
+
+  p2 <- ggplot(q, aes(x=.data$bg_cpm, y=.data$y+1, color=.data$quant, shape=.data$keep)) +
+    geom_point(alpha=0.6) +
+    geom_smooth(data=filter(q, .data$keep), linetype='dashed', method = 'lm',
+                formula = y ~ x, se=FALSE, alpha=0.6) +
+    scale_color_viridis_d(option="plasma") +
+    scale_x_log10() +
+    scale_y_log10() +
+    theme_minimal()
+  return(p1 + p2)
+}
+
+
+stgeomx_plot_expr_dist <- function(ds, bg.lod.quantile=0.9) {
+  s <- select(ds$samples, "aoi", "slide", "keep")
+  x <- ds$x
+  bg <- ds$meta$bg
+
+  # compute background level per aoi
+  s$bg_lod <- apply(x[bg,], 2, stats::quantile, bg.lod.quantile)
+
+  # quantiles
+  quantiles <- c(0.25, 0.5, 0.75, 0.90, 0.95, 0.99)
+  quant_names <- paste0("q", round(100 * quantiles))
+
+  q <- as_tibble(x) %>%
+    filter(!bg) %>%
+    reframe(across(everything(), ~ stats::quantile(.x, quantiles))) %>%
+    mutate(quant=quant_names) %>%
+    tidyr::pivot_longer(colnames(x), names_to="aoi", values_to="value") %>%
+    tidyr::pivot_wider(names_from="quant", values_from="value", names_prefix="") %>%
+    inner_join(s, by=c("aoi"="aoi"), suffix=c("_gene", "_aoi"))
+
+  data1 <- q %>%
+    rowwise() %>%
+    arrange(.data$keep, .data$q50) %>%
+    mutate(x=factor(.data$aoi, .data$aoi)) %>%
+    ungroup()
+
+  data2 <- data1 %>%
+    select("x", "slide", "keep", "q50", "q90", "q95", "q99") %>%
+    tidyr::pivot_longer(cols = c("q50", "q90", "q95", "q99"),
+                        names_to="quant", values_to="value")
+
+  p <- ggplot() +
+    geom_errorbar(data=data1, aes(x=.data$x, ymin=.data$q25+1, ymax=.data$q75+1, color=.data$keep), alpha=0.75) +
+    #geom_segment(data=data1, aes(x=x, xend=x, y=q25, yend=q75), color="grey", alpha=0.75) +
+    geom_point(data=data1, aes(x=.data$x, y=.data$bg_lod+1), color="black", shape=4, alpha=0.75) +
+    geom_point(data=data2, aes(x=.data$x, y=.data$value+1, fill=.data$quant), shape=21, alpha=0.75) +
+    scale_color_manual(values=pals::cols25()) +
+    scale_fill_viridis_d() +
+    scale_y_log10() +
+    theme_bw() +
+    theme(axis.text.x = element_blank(),
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor.x = element_blank()) +
+    facet_grid(~ slide, scales="free_x") +
+    labs(x = "AOI", y="Gene Expression")
+
+  return(p)
+}
+
+
+bgcorrect_qq <- function(x, bg, bw.adjust=1, bg.quant=0.5) {
+  # subtract constant background noise
+  bg.loq <- stats::quantile(x[bg], bg.quant)
+  x <- pmax(0, x - bg.loq)
+
+  # setup
+  n <- 2^11
+  xlog <- log2(x+1)
+
+  # select bandwidth
+  bwbg <- stats::bw.nrd0(xlog[bg]) * bw.adjust
+  bw <- stats::bw.nrd0(xlog[!bg]) * bw.adjust
+  bw <- max(bw, bwbg)
+
+  xmin <- 0
+  xmax <- max(xlog[!bg])
+  xbgmax <- max(xlog[bg])
+
+  # smooth ecdf functions for gene probes and neg probes
+  d <- stats::density(xlog[!bg], bw=bw, n=n, from=0, to=xmax)
+  dcdf <- cumsum(d$y) / sum(d$y)
+
+  dbg <- stats::density(xlog[bg], bw=bw, n=n, from=0, to=xbgmax)
+  dbgcdf <- cumsum(dbg$y) / sum(dbg$y)
+
+  # map gene probes to quantiles
+  q <- stats::approx(d$x, dcdf, xout=xlog, ties="ordered")$y
+  # map quantiles to background probes
+  log2noise <- stats::approx(dbgcdf, dbg$x, yleft=0, yright=xbgmax, rule=2,
+                             xout=q, ties="ordered")$y
+  # convert from log2 to linear scale and round up to discrete counts
+  noise <- ceiling(2^log2noise - 1)
+  #noise <- ceiling(2^log2noise - 1)
+  # ensure noise is not greater than x
+  noise <- pmin(noise, x)
+  y <- x - noise
+
+  res <- list(
+    x = x,
+    bg = bg,
+    bw.adjust = bw.adjust,
+    bg.quant = bg.quant,
+    bg.loq = bg.loq,
+    bw = bw,
+    y = y,
+    noise = noise,
+    dx = d$x,
+    dy = d$y,
+    dcdf = dcdf,
+    dbgx = dbg$x,
+    dbgy = dbg$y,
+    dbgcdf = dbgcdf
+  )
+}
+
+
+stgeomx_bgcorrect <- function(ds, method=c("qq", "bgsub", "none"),
+                      bw.adjust=1, bg.quant=0.5) {
+  # check method
+  method <- match.arg(method)
+  bg <- ds$meta$bg
+  x <- ds$counts
+
+  apply_bgcorrect_bgsub <- function(x) {
+    xsub <- ceiling(stats::quantile(x[bg], bg.quant))
+    y <- pmax(0, x - xsub)
+    return(y)
+  }
+  apply_bgcorrect_qq <- function(x) {
+    res <- bgcorrect_qq(x, bg, bw.adjust=bw.adjust, bg.quant=bg.quant)
+    return(res$y)
+  }
+
+  f <- switch(method,
+              qq = apply_bgcorrect_qq,
+              bgsub = apply_bgcorrect_bgsub,
+              none = function(x) return(x))
+  x <- apply(x, MARGIN=2, FUN=f)
+  ds$x <- x
+  return(ds)
+}
+
+
+cpm <- function(x) {
+  sweep(x, 2, colSums(x) / 1e6, FUN="/")
+}
+
+cpm2counts <- function(x, tot_counts) {
+  sweep(x, 2, tot_counts / 1e6, FUN="*")
+}
+
+
+qnorm <- function(x) {
+  # convert to relative counts (counts-per-million)
+  xcpm <- apply(x, 2, function(x) { 1e6 * x / sum(x) })
+  # compute quantiles (adding a pseudocount)
+  xquant <- apply(xcpm, 2, sort)
+  xquant <- apply(xquant, 1, function(x) { 2^(mean(log2(x+1))) })
+  xquant <- 1e6 * xquant / sum(xquant)
+  # ranks (with ties present)
+  xrank <- as.data.frame(apply(x, 2, rank, ties.method="max"))
+  # apply quantile normalization procedure using new ranks
+  xnorm <- apply(xrank, 2, function(x) { xquant[x] })
+  # renormalize (shift and scale) such that columns sum to one million
+  renorm <- function(x) {
+    x <- x - min(x)
+    return(1e6 * x / sum(x))
+  }
+  xnorm <- apply(xnorm, 2, renorm)
+  return(xnorm)
+}
+
+
+#'
+#' edgeR package
+#' Copied from https://rdrr.io/bioc/edgeR/src/R/calcNormFactors.R
+#' Cite Mark Robinson
+#' Scale factors as in Anders et al (2010)
+#' Mark Robinson
+#'
+#' @param data matrix of counts
+calc_norm_factors_rle <- function(data) {
+  gm <- exp(rowMeans(log(data)))
+  apply(data, 2, function(u) stats::median((u/gm)[gm > 0]))
+}
+
+
+stgeomx_normalize <- function(ds, method=c("qn", "rle", "cpm", "q3", "none")) {
+  # check method
+  method <- match.arg(method)
+  x <- ds$x
+
+  if (method == "none") {
+    # do nothing
+    x <- x
+  } else if (method == "qn") {
+    x <- qnorm(x)
+  } else if (method == "cpm") {
+    x <- cpm(x)
+  } else {
+    # methods Q3, RLE, and TMM produce normalization factors
+    sf <- colSums(x) / 1e6
+
+    if (method == "rle") {
+      nf <- calc_norm_factors_rle(x) / sf
+    } else if (method == "q3") {
+      nf <- pmax(1, apply(x, 2, stats::quantile, 0.75)) / sf
+    }
+    # norm factors should multiply to 1
+    nf <- nf/exp(mean(log(nf)))
+    x <- sweep(x, 2, sf * nf, FUN="/")
+  }
+
+  rownames(x) <- ds$meta$gene
+  ds$x <- x
+  return(ds)
+}
+
+
+
+
+
+```
+
+## Plotting functions
+
+```{r plotting functions}
+
+pca_plot <- function(x, xvar, yvar, color_by, shape_by) {
+  color_by_string <- rlang::as_string(rlang::ensym(color_by))
+  shape_by_string <- rlang::as_string(rlang::ensym(shape_by))
+  p <- ggplot(x, aes(x={{xvar}}, y={{yvar}}, color={{color_by}}, shape={{shape_by}})) +
+    geom_point(alpha = 0.8, size=2) +
+    scale_color_manual(values = color_scales[[color_by_string]]) +
+    scale_shape_manual(values = shape_scales[[shape_by_string]]) +
+    coord_fixed() +
+    theme_bw()
+  return(p)
+}
 
 save_pheatmap_pdf <- function(x, filename, width=7, height=7) {
   stopifnot(!missing(x))
@@ -159,7 +881,7 @@ save_pheatmap_pdf <- function(x, filename, width=7, height=7) {
 ```{r ipmn wta geomx data, include=FALSE}
 
 # read data
-ds <- stgeomx::read_xlsx(pja_ipmn_geomx_xlsx)
+ds <- stgeomx_read_xlsx(pja_ipmn_geomx_xlsx)
 # read and join sample annotation
 annot <- read_excel(pja_ipmn_geomx_annot_xlsx)
 ds$samples <- ds$samples %>% 
@@ -167,21 +889,21 @@ ds$samples <- ds$samples %>%
 
 # subset epithelial segment
 s <- ds$samples %>% filter(segment == "panck")
-ds <- stgeomx::init(samples = s,
-                    meta = ds$meta, 
-                    counts = ds$counts[, s$aoi],
-                    x = ds$counts[, s$aoi])
+ds <- stgeomx_init(samples = s,
+                   meta = ds$meta, 
+                   counts = ds$counts[, s$aoi],
+                   x = ds$counts[, s$aoi])
 
 # process dataset
-ds <- stgeomx::preprocess(ds, geomx_negprobe_lod_quantile)
-ds <- stgeomx::merge_probes(ds)
+ds <- stgeomx_preprocess(ds, geomx_negprobe_lod_quantile)
+ds <- stgeomx_merge_probes(ds)
 
 # set filtering thresholds
-ds <- stgeomx::set_thresholds(ds,
-                              min_counts = geomx_min_counts,
-                              min_auc = geomx_min_auc,
-                              aoi_min_frac_expr = geomx_aoi_min_frac_expr,
-                              gene_min_frac_expr = geomx_gene_min_frac_expr)
+ds <- stgeomx_set_thresholds(ds,
+                             min_counts = geomx_min_counts,
+                             min_auc = geomx_min_auc,
+                             aoi_min_frac_expr = geomx_aoi_min_frac_expr,
+                             gene_min_frac_expr = geomx_gene_min_frac_expr)
 
 table(ds$samples$path)
 
@@ -333,10 +1055,10 @@ ggsave(f, plot=p, device="pdf", width = 8, height = 4)
 
 ```{r qc filter aoi}
 
-p <- stgeomx::plot_aoi_filter(ds, 
-                              min_counts=geomx_min_counts,
-                              min_auc=geomx_min_auc,
-                              min_frac_expr=geomx_aoi_min_frac_expr)
+p <- stgeomx_plot_aoi_filter(ds, 
+                             min_counts=geomx_min_counts,
+                             min_auc=geomx_min_auc,
+                             min_frac_expr=geomx_aoi_min_frac_expr)
 p
 w <- 9
 h <- 4
@@ -344,7 +1066,7 @@ f <- file.path(plot_dir, "qc_aoi_filtering")
 ggsave(paste0(f, ".png"), p, width=w, height=h)
 ggsave(paste0(f, ".pdf"), p, width=w, height=h)
 
-p <- stgeomx::plot_gene_filter(ds, geomx_gene_min_frac_expr)
+p <- stgeomx_plot_gene_filter(ds, geomx_gene_min_frac_expr)
 p
 w <- 7
 h <- 7
@@ -359,23 +1081,14 @@ ggsave(paste0(f, ".pdf"), p, width=w, height=h)
 ```{r background correction}
 
 # background correction must use original unfiltered matrix
-fds <- stgeomx::bgcorrect(ds, method=bgcorrect_method, 
+fds <- stgeomx_bgcorrect(ds, method=bgcorrect_method, 
                           bw.adjust=bgcorrect_bw_adjust, 
                           bg.quant=bgcorrect_bg_quant)
 # normalize
-fds <- stgeomx::normalize(fds, norm_method)
-
-# figure: expression distribution
-p <- stgeomx::plot_expr_dist(fds)
-p
-w <- 8
-h <- 8
-f <- file.path(plot_dir, "qc_expr_dist")
-ggsave(paste0(f, ".png"), p, width=w, height=h)
-ggsave(paste0(f, ".pdf"), p, width=w, height=h)
+fds <- stgeomx_normalize(fds, norm_method)
 
 # figure: background correction
-p <- stgeomx::plot_bgcorrect2(fds)
+p <- stgeomx_plot_bgcorrect(fds)
 w <- 8
 h <- 5
 f <- file.path(plot_dir, "qc_bgcorrect")
@@ -383,26 +1096,19 @@ ggsave(paste0(f, ".png"), p, width=w, height=h)
 ggsave(paste0(f, ".pdf"), p, width=w, height=h)
 
 
-# apply filters to permanently remove aois/genes
-# fds <- stgeomx::apply_filters(fds)
-
 # background correction must use original unfiltered matrix
-fds <- stgeomx::bgcorrect(ds, method=bgcorrect_method,
+fds <- stgeomx_bgcorrect(ds, method=bgcorrect_method,
                           bw.adjust=bgcorrect_bw_adjust,
                           bg.quant=bgcorrect_bg_quant)
 # apply filters before normalizing
-fds <- stgeomx::apply_filters(fds)
+fds <- stgeomx_apply_filters(fds)
 # normalize
-fds <- stgeomx::normalize(fds, norm_method)
+fds <- stgeomx_normalize(fds, norm_method)
 
 # filtering stats
 nrow(ds$samples)
 nrow(fds$samples)
 table(ds$meta$keep)
-
-# fds$samples$complexity_norm <- apply(fds$x, 2, function(x) length(unique(x)))
-# ggplot(fds$samples, aes(complexity, complexity_norm)) + 
-#   geom_point()
 
 # final normalized gene expression matrix
 log2_norm_cpm <- log2(fds$x + 1)
@@ -586,10 +1292,6 @@ msigdb_gene_sets <- msigdb_gene_sets %>%
 # gene set categories
 gs_hallmark <- dplyr::filter(msigdb_gene_sets, gs_cat == "H")
 gs_hallmark <- split(x = gs_hallmark$gene_symbol, f = gs_hallmark$gs_name)
-gs_gobp <- dplyr::filter(msigdb_gene_sets, gs_cat == "C5:GO:BP")
-gs_gobp <- split(x = gs_gobp$gene_symbol, f = gs_gobp$gs_name)
-gs_3ca <- dplyr::filter(msigdb_gene_sets, gs_cat == "C4:3CA")
-gs_3ca <- split(x = gs_3ca$gene_symbol, f = gs_3ca$gs_name)
 
 # pancreatic cancer subtypes gene lists
 x <- readRDS(pdacr_gene_list_file)
@@ -633,13 +1335,11 @@ pdacr_pathways <- c(moffitt_pathways, collison_pathways, icgc_pathways, chan_sen
 
 y <- log2_norm_cpm
 s <- fds$samples
-gs <- c(gs_cptac, gs_hpa_panc, gs_pdacr, gs_hallmark, gs_3ca) 
+gs <- c(gs_cptac, gs_hpa_panc, gs_pdacr, gs_hallmark) 
 
 # run gsva
 x <- gsva(GSVA::gsvaParam(y, gs, tau=gsva_tau))
 rownames(x) <- gsub("HALLMARK_", "H_", rownames(x))
-rownames(x) <- gsub("GAVISH_", "", rownames(x))
-rownames(x) <- gsub("METAPROGRAM_", "", rownames(x))
 rownames(x) <- gsub("HPA_PROGNOSIS_", "HPA_", rownames(x))
 gsva_res <- x
 
@@ -651,18 +1351,6 @@ gsva_res <- x
 ## Highly variable genes
 
 ```{r highly variable genes, include=FALSE}
-
-get_var_tbl <- function(x, span=0.5) {
-  tbl <- bind_cols(
-    gene = rownames(x),
-    u = rowMeans(x),
-    v = apply(x, 1, function(x) var(x))
-  )
-  lovar <- loess(v ~ u, data=tbl, span=span)
-  tbl$lovar <- predict(lovar)
-  tbl$vadj <- tbl$v - tbl$lovar
-  return(tbl)
-}
 
 most_var_genes <- function(x, ntop=500, span=0.50) {
   tbl <- bind_cols(
@@ -767,8 +1455,8 @@ height <- 3
 
 # PCA
 npcs <- 50
-#pca_res <- prcomp(t(y), center=TRUE, scale.=FALSE, rank.=npcs)
-pca_res <- prcomp(t(y), center=TRUE, scale.=TRUE, rank.=npcs)
+pca_res <- prcomp(t(y), center=TRUE, scale.=TRUE, rank=npcs)
+pca_res$sdev <- pca_res$sdev[1:npcs]
 pca_res.var <- round(100 * pca_res$sdev^2 / sum( pca_res$sdev^2 ), 2)
 pca_res.var_txt <- paste(colnames(pca_res$x), " (", paste(as.character(pca_res.var), "%", ")", sep=""), sep="")
 
@@ -779,23 +1467,6 @@ fviz_ntop <- 50
 p <- fviz_eig(pca_res, col.var="blue", addlabels=TRUE)
 f <- file.path(plot_dir, paste0("pca_fviz_eig.pdf"))
 ggsave(f, p, width=4, height=4)
-
-# contributions of variables to each PC
-p <- fviz_contrib(pca_res, choice="var", axes=1, top=fviz_ntop) +
-  theme(axis.text.x = element_text(angle=90))
-f <- file.path(plot_dir, paste0("pca_fviz_contrib1.pdf"))
-ggsave(f, p)
-
-p <- fviz_contrib(pca_res, choice="var", axes=2, top=fviz_ntop) +
-  theme(axis.text.x = element_text(angle=90))
-f <- file.path(plot_dir, paste0("pca_fviz_contrib2.pdf"))
-ggsave(f, p)
-
-# contribution
-p <- fviz_contrib(pca_res, choice="var", axes = 1:2, top=fviz_ntop) +
-  theme(axis.text.x = element_text(angle=90))
-f <- file.path(plot_dir, paste0("pca_fviz_contrib12.pdf"))
-ggsave(f, p)
 
 # graph of variables contributing to PCA
 p <- fviz_pca_var(
@@ -808,31 +1479,6 @@ p <- fviz_pca_var(
 )
 f <- file.path(plot_dir, paste0("pca_fviz_pca_var_pc12.pdf"))
 ggsave(f, p, width=7, height=7)
-
-# graph of variables contributing to PCA
-p <- fviz_pca_var(
-  pca_res,
-  axes = c(1,3),
-  col.var = "contrib", # Color by the quality of representation
-  gradient.cols = c("darkorchid4", "gold", "darkorange"),
-  repel=TRUE,
-  select.var = list(contrib=fviz_ntop)
-)
-f <- file.path(plot_dir, paste0("pca_fviz_pca_var_pc13.pdf"))
-ggsave(f, p, width=7, height=7)
-
-# graph of variables contributing to PCA
-p <- fviz_pca_var(
-  pca_res,
-  axes = c(2,3),
-  col.var = "contrib", # Color by the quality of representation
-  gradient.cols = c("darkorchid4", "gold", "darkorange"),
-  repel=TRUE,
-  select.var = list(contrib=fviz_ntop)
-)
-f <- file.path(plot_dir, paste0("pca_fviz_pca_var_pc23.pdf"))
-ggsave(f, p, width=7, height=7)
-
 
 
 #
@@ -895,62 +1541,6 @@ p <- ggplot(x, aes(x=PC1, y=PC2, color=path, shape=path_specimen)) +
 f <- file.path(plot_dir, paste0("pca_path.pdf"))
 ggsave(f, plot=p, device="pdf", width=width, height=height)
 
-
-
-#
-# Plots of PC1, PC2, and PC3
-#
-pca_plot <- function(x, xvar, yvar, color_by, shape_by) {
-  color_by_string <- rlang::as_string(rlang::ensym(color_by))
-  shape_by_string <- rlang::as_string(rlang::ensym(shape_by))
-  
-  if (is.character(pull(x, {{color_by}}))) {
-    scale_color_func <- scale_color_manual(values = color_scales[[color_by_string]])
-  } else {
-    scale_color_func <- scale_color_viridis_c()
-  }
-
-  p <- ggplot(x, aes(x={{xvar}}, y={{yvar}}, color={{color_by}}, shape={{shape_by}})) +
-    geom_point(alpha = 0.8, size=3) +
-    scale_color_func +
-    #scale_color_manual(values = color_scales[[color_by_string]]) +
-    scale_shape_manual(values = shape_scales[[shape_by_string]]) +
-    theme_bw() +
-    theme(aspect.ratio=1,
-          legend.text = element_text(size=7))
-    # coord_fixed() +
-  return(p)
-}
-
-
-# bg_auc
-p12 <- pca_plot(x, PC1, PC2, bg_auc, path_specimen)
-p13 <- pca_plot(x, PC1, PC3, bg_auc, path_specimen)
-p23 <- pca_plot(x, PC2, PC3, bg_auc, path_specimen)
-p <- p12 + p13 + p23 + 
-  plot_layout(guides = "collect")
-f <- file.path(plot_dir, paste0("pca_bg_auc_pc123.pdf"))
-ggsave(f, plot=p, device="pdf", width=12, height=6)
-
-# path aoi
-p12 <- pca_plot(x, PC1, PC2, path_aoi, path_specimen)
-p13 <- pca_plot(x, PC1, PC3, path_aoi, path_specimen)
-p23 <- pca_plot(x, PC2, PC3, path_aoi, path_specimen)
-p <- p12 + p13 + p23 + 
-  plot_layout(guides = "collect")
-f <- file.path(plot_dir, paste0("pca_path_aoi_pc123.pdf"))
-ggsave(f, plot=p, device="pdf", width=12, height=6)
-
-# patient
-p12 <- pca_plot(x, PC1, PC2, patient, path_specimen)
-p13 <- pca_plot(x, PC1, PC3, patient, path_specimen)
-p23 <- pca_plot(x, PC2, PC3, patient, path_specimen)
-p <- p12 + p13 + p23 + 
-  plot_layout(guides = "collect")
-f <- file.path(plot_dir, paste0("pca_patient_pc123.pdf"))
-ggsave(f, plot=p, device="pdf", width=12, height=6)
-
-
 ```
 
 
@@ -972,17 +1562,6 @@ p <- fviz_nbclust(x, FUNcluster=cluster::pam, method="silhouette")
 f <- file.path(plot_dir, paste0("pca_fviz_nbclust_silhouette.pdf"))
 ggsave(f, plot=p, device="pdf", width=4, height=4)
 
-p <- fviz_nbclust(x, FUNcluster=cluster::pam, method="wss")
-f <- file.path(plot_dir, paste0("pca_fviz_nbclust_wss.pdf"))
-ggsave(f, plot=p, device="pdf", width=4, height=4)
-
-#p <- fviz_nbclust(x, FUNcluster=cluster::pam, method="gap_stat", nboot=100)
-p <- fviz_gap_stat(cluster::clusGap(x, FUNcluster=cluster::pam, K.max=10, B=100),
-                   maxSE=list(method="Tibs2001SEmax"))
-f <- file.path(plot_dir, paste0("pca_fviz_nbclust_gapstat.pdf"))
-ggsave(f, plot=p, device="pdf", width=4, height=4)
-
-
 # cluster PCA results
 # pam
 x <- pca_res$x[,1:npcs]
@@ -996,13 +1575,9 @@ fds$samples$cluster <- memb
 x <- bind_cols(fds$samples, as_tibble(pca_res$x))
 
 # pca plot clustering
-p12 <- pca_plot(x, PC1, PC2, cluster, path_specimen)
-p13 <- pca_plot(x, PC1, PC3, cluster, path_specimen)
-p23 <- pca_plot(x, PC2, PC3, cluster, path_specimen)
-p <- p12 + p13 + p23 +
-  plot_layout(guides = "collect")
-f <- file.path(plot_dir, paste0("pca_cluster_pc123.pdf"))
-ggsave(f, plot=p, device="pdf", width=12, height=6)
+p <- pca_plot(x, PC1, PC2, cluster, path_specimen)
+f <- file.path(plot_dir, paste0("pca_cluster_unidentified.pdf"))
+ggsave(f, plot=p, device="pdf", width=6, height=6)
 
 
 #
@@ -1119,71 +1694,6 @@ de <- bind_rows(de, res)
 # write cluster results
 write_xlsx(res, file.path(results_dir, "de_clusters.xlsx"))
 
-#
-# DE analysis INV vs LGD specimens
-#
-design <- model.matrix(~0 + path_patient, s)
-colnames(design) <- levels(s$path_patient)
-colnames(design)
-contrasts <- makeContrasts(
-  invinv_vs_lgdnl = ipmn_inv_inv - ipmn_lgd_nl,
-  invhgd_vs_lgdnl = ipmn_inv_hgd - ipmn_lgd_nl,
-  invlgd_vs_lgdnl = ipmn_inv_lgd - ipmn_lgd_nl,
-  invnl_vs_lgdnl = ipmn_inv_nl - ipmn_lgd_nl,
-  invinv_vs_lgdlgd = ipmn_inv_inv - ipmn_lgd_lgd,
-  invhgd_vs_lgdlgd = ipmn_inv_hgd - ipmn_lgd_lgd,
-  invlgd_vs_lgdlgd = ipmn_inv_lgd - ipmn_lgd_lgd,
-  levels=design
-)
-res <- run_limma_trend(y, design, contrasts,
-                       padj_cutoff=de_padj_cutoff,
-                       log2fc_cutoff=de_log2fc_cutoff)
-table(res$contrast, res$de)
-de <- bind_rows(de, res)
-
-#
-# DE analysis of INV lesions
-#
-s <- filter(fds$samples, path_specimen == "ipmn_inv")
-s$patient <- factor(s$patient)
-s$path_aoi <- factor(s$path_aoi, levels=c("nl", "lgd", "hgd", "inv"))
-y <- log2_norm_cpm[, s$aoi]
-
-design <- model.matrix(~0 + path_aoi + patient, s)
-contrasts <- makeContrasts(invinv_vs_invnl = path_aoiinv - path_aoinl,
-                           invhgd_vs_invnl = path_aoihgd - path_aoinl,
-                           invlgd_vs_invnl = path_aoilgd - path_aoinl,
-                           invinv_vs_invlgd = path_aoiinv - path_aoilgd,
-                           invhgd_vs_invlgd = path_aoihgd - path_aoilgd,
-                           invinv_vs_invhgd = path_aoiinv - path_aoihgd,
-                           levels=design)
-res <- run_limma_trend(y, design, contrasts,
-                       padj_cutoff=de_padj_cutoff,
-                       log2fc_cutoff=de_log2fc_cutoff)
-table(res$contrast, res$de)
-de <- bind_rows(de, res)
-
-
-#
-# DE analysis of LGD lesions
-#
-s <- filter(fds$samples, path_specimen == "ipmn_lgd")
-s$patient <- factor(s$patient)
-s$path_aoi <- factor(s$path_aoi, levels=c("nl", "lgd"))
-y <- log2_norm_cpm[, s$aoi]
-
-design <- model.matrix(~0 + path_aoi + patient, s)
-contrasts <- makeContrasts(lgdlgd_vs_lgdnl = path_aoilgd - path_aoinl,
-                           levels=design)
-res <- run_limma_trend(y, design, contrasts,
-                       padj_cutoff=de_padj_cutoff,
-                       log2fc_cutoff=de_log2fc_cutoff)
-table(res$contrast, res$de)
-de <- bind_rows(de, res)
- 
-# write all results
-table(de$contrast)
-write_xlsx(de, file.path(results_dir, "de_path.xlsx"))
 
 ```
 
@@ -1312,147 +1822,6 @@ p <- plot_pheatmap(x,
 save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
 
 
-#
-# LGD specimens
-#
-# de gene params
-padj_cutoff <- 1e-5
-log2fc_cutoff <- 3
-ntop <- 50
-contrasts <- c("lgdlgd_vs_lgdnl")
-path_types <- c("ipmn_lgd_nl_epithelial", "ipmn_lgd_lgd_epithelial")
-
-g <- filter(de, contrast %in% contrasts,
-            abs(log2fc) > log2fc_cutoff, 
-            padj < padj_cutoff) %>%
-  group_by(contrast, de) %>%
-  slice_max(abs(log2fc), n=ntop) %>%
-  ungroup() %>%
-  distinct(gene) %>% 
-  pull(gene)
-ngenes <- length(g)
-
-# standardize gene expression
-s <- fds$samples %>% filter(path %in% path_types)
-snl <- fds$samples %>% filter(path %in% "ipmn_lgd_nl_epithelial")
-
-x <- log2_norm_cpm[g, s$aoi]
-u <- apply(x[, snl$aoi], 1, median)
-x <- sweep(x, 1, u, FUN="-")
-v <- pmax(apply(x, 1, sd), 1)
-x <- sweep(x, 1, v, FUN="/")
-xmin <- -3
-xmax <- 3
-
-# heatmap
-f <- file.path(plot_dir,  paste0("heatmap_de_ipmn_lgd_", ngenes, "_genes"))
-h <- round(3 + (length(g) / 10))
-w <- 10
-p <- plot_pheatmap(x, 
-                   annot_col[s$aoi,], 
-                   annot_row[g,], 
-                   annot_colors=color_scales,
-                   filename=paste0(f, ".png"), 
-                   width=w, height=h,
-                   xmin=xmin, xmax=xmax)
-save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
-
-
-
-#
-# HGD/INV specimens
-#
-# de gene params
-padj_cutoff <- 1e-5
-log2fc_cutoff <- 3
-ntop <- 50
-contrasts <- c("invhgd_vs_invlgd",
-               "invhgd_vs_invnl", 
-               "invlgd_vs_invnl", 
-               "invinv_vs_invhgd",
-               "invinv_vs_invlgd",
-               "invinv_vs_invnl")
-path_types <- c("ipmn_inv_hgd_epithelial", 
-                "ipmn_inv_inv_epithelial",
-                "ipmn_inv_lgd_epithelial", 
-                "ipmn_lgd_lgd_epithelial",
-                "ipmn_inv_nl_epithelial")
-nl_types <- c("ipmn_inv_nl_epithelial")
-
-g <- filter(de, contrast %in% contrasts,
-            abs(log2fc) > log2fc_cutoff, 
-            padj < padj_cutoff) %>%
-  group_by(contrast, de) %>%
-  slice_max(abs(log2fc), n=ntop) %>%
-  ungroup() %>%
-  distinct(gene) %>% 
-  pull(gene)
-ngenes <- length(g)
-
-# standardize gene expression
-s <- fds$samples %>% filter(path %in% path_types)
-snl <- fds$samples %>% filter(path %in% nl_types)
-x <- log2_norm_cpm[g, s$aoi]
-u <- apply(x[, snl$aoi], 1, median)
-x <- sweep(x, 1, u, FUN="-")
-v <- pmax(apply(x, 1, sd), 1)
-x <- sweep(x, 1, v, FUN="/")
-xmin <- -3
-xmax <- 3
-
-# heatmap
-f <- file.path(plot_dir,  paste0("heatmap_de_inv_ipmn_", ngenes, "_genes"))
-h <- round(3 + (length(g) / 10))
-w <- 10
-p <- plot_pheatmap(x, 
-                   annot_col[s$aoi,], 
-                   annot_row[g,], 
-                   annot_colors=color_scales,
-                   filename=paste0(f, ".png"), 
-                   width=w, height=h,
-                   xmin=xmin, xmax=xmax)
-save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
-
-
-#
-# Full IPMN Dataset
-#
-padj_cutoff <- 1e-5
-log2fc_cutoff <- 5
-ntop <- 50
-
-nl_types <- c("ipmn_lgd_nl_epithelial",
-              "ipmn_inv_nl_epithelial")
-
-g <- filter(de, abs(log2fc) > log2fc_cutoff, padj < padj_cutoff) %>%
-  group_by(contrast, de) %>%
-  slice_max(abs(log2fc), n=ntop) %>%
-  ungroup() %>%
-  distinct(gene) %>% 
-  pull(gene)
-ngenes <- length(g)
-
-# standardize gene expression
-s <- fds$samples
-x <- log2_norm_cpm[g, s$aoi]
-x <- t(scale(t(x)))
-xmin <- -2
-xmax <- 2
-
-# heatmap
-f <- file.path(plot_dir,  paste0("heatmap_de_ipmn_", ngenes, "_genes"))
-h <- round(3 + (length(g) / 10))
-w <- 10
-
-p <- plot_pheatmap(x,
-                   annot_col[s$aoi,],
-                   annot_row[g,],
-                   annot_colors=color_scales,
-                   filename=paste0(f, ".png"),
-                   width=w, height=h,
-                   xmin=xmin, xmax=xmax)
-save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
-
 ```
 
 
@@ -1462,8 +1831,9 @@ save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
 
 s <- fds$samples
 y <- log2_norm_cpm
+feature_plot_genes <- c("CTRB1", "CRISP3", "TRIM29", "PGC")
 
-for (gene in cluster_marker_genes) {
+for (gene in feature_plot_genes) {
   print(gene)
   x <- bind_cols(s, as_tibble(pca_res$x), gene=unlist(y[gene,]))
   p <- ggplot(x, aes(x=PC1, y=PC2, color=gene, shape=path_specimen)) +
@@ -1542,8 +1912,8 @@ plot_de_scatter2d <- function(tbl, xcontrast, ycontrast, nlabel=10,
     scale_color_manual(values = color_scale) +
     scale_size_manual(values = size_scale, guide = "none") + 
     theme_minimal() +
-    xlab(as_string(xlog2fc)) +
-    ylab(as_string(ylog2fc)) +
+    xlab(rlang::as_string(xlog2fc)) +
+    ylab(rlang::as_string(ylog2fc)) +
     labs(color = "DE Genes")
   return(p)
 }
@@ -1555,7 +1925,6 @@ de_merged <- de %>% select(gene, contrast, log2fc, padj, de) %>%
 nlabel <- 10
 width <- 8
 height <- 8
-
 
 #
 # IPMN Clusters
@@ -1579,100 +1948,6 @@ p <- plot_de_scatter2d(de_merged,
 f <- file.path(plot_dir, "scatter2d_de_x_clusterHRvNL_y_clusterLRvNL")
 ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
 ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
-
-
-
-
-#
-# IPMN INV Specimens
-#
-p <- plot_de_scatter2d(de_merged, 
-                       xcontrast="invinv_vs_invnl", 
-                       ycontrast="invinv_vs_invlgd", 
-                       nlabel=nlabel) +
-  labs(title="IPMN Specimens", 
-       subtitle="INV vs NL (x-axis) INV vs LGD (y-axis)")
-f <- file.path(plot_dir, "scatter2d_de_x_invinv_vs_invnl_y_invinv_vs_invlgd")
-ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
-ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
-
-
-p <- plot_de_scatter2d(de_merged, 
-                       xcontrast="invinv_vs_invnl", 
-                       ycontrast="invhgd_vs_invnl", 
-                       nlabel=nlabel) +
-  labs(title="IPMN INV Specimens", 
-       subtitle="INV-INV vs INV-NL (x-axis) INV-HGD vs INV-NL (y-axis)")
-f <- file.path(plot_dir, "scatter2d_de_x_invinv_vs_invnl_y_invhgd_vs_invnl")
-ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
-ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
-
-p <- plot_de_scatter2d(de_merged, 
-                       xcontrast="invinv_vs_invnl", 
-                       ycontrast="invinv_vs_invhgd", 
-                       nlabel=nlabel) +
-  labs(title="IPMN INV Specimens", 
-       subtitle="INV-INV vs INV-NL (x-axis) INV-INV vs INV-HGD (y-axis)")
-f <- file.path(plot_dir, "scatter2d_de_x_invinv_vs_invnl_y_invinv_vs_invhgd")
-ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
-ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
-
-p <- plot_de_scatter2d(de_merged, 
-                       xcontrast="invhgd_vs_invnl", 
-                       ycontrast="invlgd_vs_invnl", 
-                       nlabel=nlabel) +
-  labs(title="IPMN INV Specimens", 
-       subtitle="INV-HGD vs INV-NL (x-axis) INV-LGD vs INV-NL (y-axis)")
-f <- file.path(plot_dir, "scatter2d_de_x_invhgd_vs_invnl_y_invlgd_vs_invnl")
-ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
-ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
-
-
-
-#
-# IPMN: LGD vs NL in INV and LGD specimens
-#
-p <- plot_de_scatter2d(de_merged, 
-                       xcontrast="invlgd_vs_invnl", 
-                       ycontrast="lgdlgd_vs_lgdnl", 
-                       nlabel=nlabel) +
-  labs(title="IPMN: INV vs LGD Specimens", 
-       subtitle="INV-LGD vs INV-NL (x-axis) LGD-LGD vs LGD-NL (y-axis)")
-f <- file.path(plot_dir, "scatter2d_de_x_invlgd_vs_invnl_y_lgdlgd_vs_lgdnl")
-ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
-ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
-
-p <- plot_de_scatter2d(de_merged, 
-                       xcontrast="invlgd_vs_lgdnl", 
-                       ycontrast="invlgd_vs_lgdlgd", 
-                       nlabel=nlabel) +
-  labs(title="IPMN INV vs LGD specimens ", 
-       subtitle="INV-LGD vs LGD-NL (x-axis) INV-LGD vs LGD-LGD (y-axis)")
-f <- file.path(plot_dir, "scatter2d_de_x_invlgd_vs_lgdnl_y_invlgd_vs_lgdlgd")
-ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
-ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
-
-p <- plot_de_scatter2d(de_merged, 
-                       xcontrast="invlgd_vs_invnl", 
-                       ycontrast="invlgd_vs_lgdlgd", 
-                       nlabel=nlabel) +
-  labs(title="IPMN INV vs LGD specimens ", 
-       subtitle="INV-LGD vs INV-NL (x-axis) INV-LGD vs LGD-LGD (y-axis)")
-f <- file.path(plot_dir, "scatter2d_de_x_invlgd_vs_invnl_y_invlgd_vs_lgdlgd")
-ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
-ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
-
-
-p <- plot_de_scatter2d(de_merged,
-                       xcontrast="invnl_vs_lgdnl",
-                       ycontrast="invlgd_vs_lgdlgd",
-                       nlabel=nlabel) +
-  labs(title="IPMN Specimens",
-       subtitle="invnl_vs_lgdnl (x-axis) invlgd_vs_lgdlgd (y-axis)")
-f <- file.path(plot_dir, "scatter2d_nllgd_de_x_invnl_vs_lgdnl_y_invlgd_vs_lgdlgd")
-ggsave(paste0(f, ".pdf"), plot=p, width=8, height=8)
-ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
-
 
 ```
 
@@ -1771,13 +2046,6 @@ gsea <- bind_rows(gsea, res)
 res <- fgsea_run_batch(de, gs_hallmark, 
                        fgsea_eps=0, fgsea_nperms=10000, fgsea_nproc=10)
 gsea <- bind_rows(gsea, res)
-# 3ca
-res <- fgsea_run_batch(de, gs_3ca, fgsea_eps=0, fgsea_nperms=10000, fgsea_nproc=10)
-gsea <- bind_rows(gsea, res)
-# gobp
-#res <- fgsea_run_batch(de, gs_gobp, fgsea_eps=0, fgsea_nperms=10000, fgsea_nproc=10)
-#gsea <- bind_rows(gsea, res)
-
 gsea_all <- gsea
 
 ```
@@ -1922,35 +2190,6 @@ p <- ggplot(res, aes(x=NES, y=pathway, fill=neglog10padj)) +
 f <- paste0("gsea_barplot_clusters_hallmark")
 ggsave(file.path(plot_dir, paste0(f, ".pdf")), p, width=6, height=3)
 ggsave(file.path(plot_dir, paste0(f, ".png")), p, width=6, height=3)
-
-
-#
-# 3CA
-#
-res <- gsea %>% filter(pathway %in% names(gs_3ca)) %>% 
-  mutate(pathway = gsub("GAVISH_3CA_", "", pathway)) %>%
-  mutate(pathway = gsub("METAPROGRAM_", "", pathway))
-# only keep significant results (at least one contrast)
-res <- res %>% group_by(pathway) %>%
-  filter(any(padj < gsea_padj_cutoff)) %>%
-  ungroup()
-
-# arrange by clusterHRvLR for readability
-pathway_levels <- filter(res, contrast == "clusterHRvLR") %>% arrange(NES) %>% pull(pathway)
-res$pathway <- factor(res$pathway, levels=pathway_levels)
-
-p <- ggplot(res, aes(x=NES, y=pathway, fill=neglog10padj)) +
-  geom_col() + 
-  scale_fill_viridis_c() +
-  theme_bw() + 
-  theme(axis.text.y = element_text(color="black", size=7)) +
-  theme(strip.text = element_text(size=8)) +
-  facet_wrap(~ contrast, nrow=1) + 
-  labs(x="Normalized Enrichment Score (NES)", y="Pathway")
-
-f <- paste0("gsea_barplot_clusters_3ca")
-ggsave(file.path(plot_dir, paste0(f, ".pdf")), p, width=8, height=12)
-ggsave(file.path(plot_dir, paste0(f, ".png")), p, width=8, height=12)
 
 
 ```
@@ -2501,7 +2740,7 @@ ggsave(paste0(f, ".pdf"), p, width=7, height=5)
 
 ## BG AUC PCA correlations
 
-```{r gsva pca correlation}
+```{r bg auc pca correlation}
 
 pc_names <- c("PC1", "PC2", "PC3")
 
@@ -2657,28 +2896,11 @@ ggsave(f, plot=p, device="pdf", width=width, height=height)
 s <- fds$samples %>% filter(path_aoi %in% c("nl","lgd"))
 y <- log2_norm_cpm[, s$aoi]
 
-# choose number of clusters
-p <- fviz_nbclust(nllgd.pca$x, FUNcluster=hcut, method="silhouette")
-f <- file.path(plot_dir, paste0("pca_nllgd_fviz_nbclust.pdf"))
-ggsave(f, plot=p, device="pdf", width=4, height=4)
-
 # set number of pcs
 npcs <- 2
 
 # set number of clusters
 nclusters <- 3
-
-# hierarchical clustering based on first two PCs
-# x <- nllgd.pca$x[,1:2]
-# d <- dist(x)
-# hc <- hclust(d, method="ward.D2")
-# memb <- cutree(hc, k=nclusters)
-# memb <- paste0("c", memb)
-
-# commented out: decided to use hierarchical clustering
-# kmeans clustering based on PCs
-# km <- kmeans(x, centers=nclusters)
-# memb <- paste0("c", km$cluster)
 
 # pam
 x <- nllgd.pca$x[,1:npcs]
@@ -2762,8 +2984,7 @@ ggsave(f, plot=p, device="pdf", width=22, height=6)
 
 # compare clustering
 table(nllgd_samples$cluster_nllgd_name, nllgd_samples$cluster_name)
-#x <- nllgd_samples %>% select(aoi, cluster_nllgd)
-#x <- x %>% left_join(select(fds$samples, aoi, cluster_name), by="aoi", suffix=c(".nllgd", ".all"))
+
 
 ```
 
@@ -2866,99 +3087,6 @@ ggsave(paste0(f, ".png"), plot=p, width=8, height=8)
 
 
 #
-# 3D scatter plot
-#
-#https://plotly.com/r/reference/#scatter-mode
-
-tbl <- nllgd_de_merged
-xcontrast <- "clusterHRvNL"
-ycontrast <- "clusterLRvNL"
-zcontrast <- "clusterHRvLR"
-
-xlog2fc_formula <- as.formula(paste0("~log2fc_", xcontrast))
-ylog2fc_formula <- as.formula(paste0("~log2fc_", ycontrast))
-zlog2fc_formula <- as.formula(paste0("~log2fc_", zcontrast))
-xlog2fc <- sym(paste0("log2fc_", xcontrast))
-ylog2fc <- sym(paste0("log2fc_", ycontrast))
-zlog2fc <- sym(paste0("log2fc_", zcontrast))
-xde <- sym(paste0("de_", xcontrast))
-yde <- sym(paste0("de_", ycontrast))
-zde <- sym(paste0("de_", zcontrast))
-
-tbl <- tbl %>% mutate(
-  subtype = paste0("x", {{xde}}, "_y", {{yde}}, "_z", {{zde}}),
-  marker_size = case_when(subtype == "xno_yno_zno" ~ 0.001,
-                          TRUE ~ 2),
-  log2fc_abs_x = case_when({{xde}} == "no" ~ 0,
-                           TRUE ~ abs({{xlog2fc}})),
-  log2fc_abs_y = case_when({{yde}} == "no" ~ 0,
-                           TRUE ~ abs({{ylog2fc}})),
-  log2fc_abs_z = case_when({{yde}} == "no" ~ 0,
-                           TRUE ~ abs({{zlog2fc}})),
-  log2fc_abs_max = pmax(log2fc_abs_x, log2fc_abs_y, log2fc_abs_z)
-)
-
-marker_colors = c(
-  xup_yup_zup = "#ffffff",
-  xup_yup_zno = "#ffff88",
-  xup_yup_zdn = "#ffff00",
-  xup_yno_zup = "#ff88ff",
-  xup_yno_zno = "#ff8888",
-  xup_yno_zdn = "#ff8800",
-  xup_ydn_zup = "#ff00ff",
-  xup_ydn_zno = "#ff0088",
-  xup_ydn_zdn = "#ff0000",
-  xno_yup_zup = "#88ffff",
-  xno_yup_zno = "#88ff88",
-  xno_yup_zdn = "#88ff00",
-  xno_yno_zup = "#8888ff",
-  xno_yno_zno = "#cccccccc",
-  xno_yno_zdn = "#888800",
-  xno_ydn_zup = "#8800ff",
-  xno_ydn_zno = "#880088",
-  xno_ydn_zdn = "#880000",
-  xdn_yup_zup = "#88ffff",
-  xdn_yup_zno = "#00ff88",
-  xdn_yup_zdn = "#00ff00",
-  xdn_yno_zup = "#0088ff",
-  xdn_yno_zno = "#008888",
-  xdn_yno_zdn = "#008800",
-  xdn_ydn_zup = "#0000ff",
-  xdn_ydn_zno = "#000088",
-  xdn_ydn_zdn = "#000000"
-)
-
-label_data <- filter(tbl, subtype != "xno_yno_zno", log2fc_abs_max > 0) %>% 
-  group_by(subtype) %>%
-  slice_max(log2fc_abs_max, n=5) %>%
-  ungroup()
-
-label_text <- list(
-  family = "helvetica",
-  size = 6,
-  color = toRGB("grey50"))
-
-p <- plot_ly(filter(tbl, subtype == "xno_yno_zno"), 
-             type="scatter3d",
-             mode="markers",
-             x=xlog2fc_formula,
-             y=ylog2fc_formula,
-             z=zlog2fc_formula,
-             color=~subtype,
-             size=~marker_size,
-             colors=marker_colors) %>%
-  add_markers(data = filter(tbl, subtype != "xno_yno_zno"),
-              marker = list(line = list(color = '#000000', width=1)),
-              text=~gene) %>%
-  add_text(data = label_data,
-           x=xlog2fc_formula,
-           y=ylog2fc_formula,
-           z=zlog2fc_formula,
-           text=~gene,
-           textfont=label_text)
-
-
-#
 # Heatmap
 #
 # setup heatmap annotations
@@ -3000,9 +3128,6 @@ g <- filter(nllgd_de, contrast %in% contrasts,
   pull(gene)
 ngenes <- length(g)
 cluster_marker_genes <- g
-
-#g <- c("OLFM4", "CRISP3")
-#g <- label_data %>% pull(gene)
 
 # centered gene expression (subtract mean)
 s <- nllgd_samples
@@ -3064,13 +3189,6 @@ gsea <- bind_rows(gsea, res)
 res <- fgsea_run_batch(nllgd_de, gs_hallmark, 
                        fgsea_eps=0, fgsea_nperms=10000, fgsea_nproc=10)
 gsea <- bind_rows(gsea, res)
-# 3ca
-res <- fgsea_run_batch(nllgd_de, gs_3ca, fgsea_eps=0, fgsea_nperms=10000, fgsea_nproc=10)
-gsea <- bind_rows(gsea, res)
-# gobp
-#res <- fgsea_run_batch(nllgd_de, gs_gobp, fgsea_eps=0, fgsea_nperms=10000, fgsea_nproc=10)
-#gsea <- bind_rows(gsea, res)
-
 gsea_nllgd <- gsea
 
 ```
@@ -3200,1928 +3318,5 @@ ggsave(file.path(plot_dir, paste0(f, ".pdf")), p, width=5, height=4)
 ggsave(file.path(plot_dir, paste0(f, ".png")), p, width=5, height=4)
 
 
-#
-# 3CA
-#
-res <- gsea %>% filter(pathway %in% names(gs_3ca)) %>% 
-  mutate(contrast = sub("cluster", "", contrast),
-         pathway = gsub("GAVISH_3CA_", "", pathway)) %>%
-  mutate(pathway = gsub("METAPROGRAM_", "", pathway))
-# only keep significant results (at least one contrast)
-res <- res %>% group_by(pathway) %>%
-  filter(any(padj < gsea_padj_cutoff)) %>%
-  ungroup()
-
-# arrange by clusterHRvLR for readability
-pathway_levels <- filter(res, group == "all", contrast == "HRvLR") %>% arrange(NES) %>% pull(pathway)
-res$pathway <- factor(res$pathway, levels=pathway_levels)
-
-p <- ggplot(res, aes(x=NES, y=pathway, fill=neglog10padj)) +
-  geom_col() + 
-  scale_fill_viridis_c() +
-  theme_bw() + 
-  theme(axis.text.y = element_text(color="black", size=7)) +
-  theme(strip.text = element_text(size=8)) +
-  facet_wrap(~ contrast + group, nrow=1) + 
-  labs(x="Normalized Enrichment Score (NES)", y="Pathway")
-
-f <- paste0("gsea_nllgd_barplot_clusters_3ca")
-ggsave(file.path(plot_dir, paste0(f, ".pdf")), p, width=8, height=12)
-ggsave(file.path(plot_dir, paste0(f, ".png")), p, width=8, height=12)
-
-
 ```
-
-# Gene plots
-
-```{r gene plots}
-
-plot_gene <- function(s, x, gene, aes_x, aes_color) {
-  exprs <- unlist(x[gene, ])
-  #exprs <- scale(exprs)
-  x <- s %>% add_column(gene = exprs)
-  p <- ggplot(x, aes(x={{ aes_x }}, y=gene, fill={{aes_color}})) +
-    geom_boxplot(outlier.shape=NA, width=0.75) +
-    geom_point(position=position_jitterdodge(jitter.width=0.1), 
-               aes(group={{aes_color}}), pch=21) +
-    ggtitle(paste0("Gene: ", gene)) +
-    theme_bw() + 
-    theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
-    theme(axis.line = element_line(color = "black"))
-  return(p)
-}
-
-
-s <- fds$samples
-y <- log2_norm_cpm
-
-g <- "NKX6-2"
-s$path_aoi <- factor(s$path_aoi, levels=c("nl", "lgd", "hgd", "inv"))
-p <- plot_gene(s, y, g, cluster_name, path_aoi) + 
-  scale_fill_manual(values = color_scales$path_aoi)
-
-f <- paste0("gene_plot_", g)
-ggsave(file.path(plot_dir, paste0(f, ".pdf")), p, width=3, height=3)
-ggsave(file.path(plot_dir, paste0(f, ".png")), p, width=3, height=3)
-
-
-
-```
-
-# END OF ANALYSIS
-
-# Gene plots
-
-```{r}
-
-
-s <- fds$samples
-y <- log2_norm_cpm
-
-s$path_aoi <- factor(s$path_aoi, levels=c("nl", "lgd", "hgd", "inv"))
-p <- plot_gene(s, y, "LAMC2", path_specimen, path_aoi) + 
-  scale_fill_manual(values = color_scales$path_aoi)
-p
-
-genes <- c("OLFM4", "MALL", "TNS4", "CLDN4", "DUOX2")
-
-w <- 5
-h <- 4
-
-
-g <- "PIKFYVE"
-
-x <- s %>% add_column(gene = y[g,])
-p <- ggplot(x, aes(x=cluster_name, y=gene, fill=cluster_name)) +
-  geom_boxplot(outlier.shape=NA, width=0.75) +
-  geom_point(aes(group=cluster_name),
-             position=position_jitterdodge(jitter.width=0.1))
-
-
-p <- ggplot(x, aes(x={{ aes_x }}, y=gene, fill={{aes_color}})) +
-  geom_boxplot(outlier.shape=NA, width=0.75) +
-  geom_point(position=position_jitterdodge(jitter.width=0.1), 
-             aes(group={{aes_color}}), pch=21) +
-  ggtitle(paste0("Gene: ", gene)) +
-  theme_bw() + 
-  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
-  theme(axis.line = element_line(color = "black"))
-return(p)
-  
-
-p <- plot_gene(s, y, "OLFM4", path_aoi, path_specimen) + 
-  scale_fill_manual(values=color_scales$path_aoi)
-
-
-```
-
-
-
-## NL-LGD GSEA LE plots
-
-```{r gsea nlld le}
-
-# setup heatmap annotations
-gene_annot <- fds$meta %>%
-  left_join(hpa_pdac, by=c("gene"="gene_symbol")) %>%
-  left_join(cptac_de_merged, by=c("gene"="gene_symbol")) %>%
-  mutate(de_cptac_rna = replace_na(de_cptac_rna, "na"),
-         de_cptac_prot = replace_na(de_cptac_prot, "na"))
-annot_row <- gene_annot %>%
-  select(gene, prognostic, de_cptac_rna, de_cptac_prot) %>%
-  column_to_rownames("gene") %>%
-  as.data.frame()
-
-#
-# basallike genes
-#
-pathways <- c("Moffitt.F6_BasalLike.top250")
-
-x <- gsea %>% filter(pathway %in% pathways)
-x <- x %>% mutate(contrast = paste0(contrast, ".", group))
-
-y <- bind_rows(mutate(de, contrast = paste0(contrast, ".all")),
-               mutate(nllgd_de, contrast = paste0(contrast, ".nllgd")))
-
-m <- gsea_leading_edge_matrix(x, y, gsea_padj_cutoff=gsea_padj_cutoff, 
-                              min_gene_sets=1, min_contrasts=2)
-
-# show intersection with CPTAC
-genes <- rownames(m)
-length(genes)
-table(annot_row[genes,]$de_cptac_rna)
-table(annot_row[genes,]$de_cptac_prot)
-table(annot_row[genes,]$de_cptac_rna, annot_row[genes,]$de_cptac_prot)
-table(annot_row[genes,]$prognostic)
-# agreement across studies
-table(rowSums(sign(m) > 0))
-
-p <- pheatmap(m, 
-              scale = "none",
-              color = colorRampPalette(c("blue", "white", "red"))(50),
-              breaks = seq(-1, 1, length.out=51),
-              cellwidth = 6,
-              cellheight = 6,
-              border_color = "black",
-              cluster_rows = TRUE,
-              cluster_cols = TRUE,
-              clustering_distance_rows = "euclidean",
-              clustering_distance_cols = "euclidean",
-              clustering_method = "ward.D2",
-              annotation_row = annot_row,
-              annotation_colors = color_scales,
-              fontsize_col = 4,
-              fontsize_row = 6)
-h <- 10
-w <- 6
-save_pheatmap_pdf(p, filename=file.path(plot_dir, "leading_edge_nllgd_basal.pdf"), width=w, height=h)
-
-
-```
-
-
-# gene plots
-
-```{r nllgd gene plots}
-
-
-plot_gene <- function(s, x, gene, aes_x, aes_color) {
-  exprs <- unlist(x[gene, ])
-  x <- s %>% add_column(gene = exprs)
-  p <- ggplot(x, aes(x={{ aes_x }}, y=gene, fill={{aes_color}})) +
-    geom_boxplot(outlier.shape = NA, width=0.75) +
-#    geom_violin(scale="width", width=0.5) +
-    geom_point(position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.5)) +
-    ggtitle(paste0("Gene: ", gene)) +
-    theme_minimal() + 
-    theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
-    theme(axis.line = element_line(color = "black"))
-  return(p)
-}
-
-plot_gene2 <- function(s, x, gene, aes_x, aes_color) {
-  exprs <- unlist(x[gene, ])
-  x <- s %>% add_column(gene = exprs)
-  p <- ggplot(x, aes(x={{ aes_x }}, y=gene, fill={{aes_color}})) +
-    geom_boxplot(outlier.shape=NA, width=0.75) +
-    geom_point(position=position_jitterdodge(jitter.width=0.1), 
-               aes(group={{aes_color}}), pch=21) +
-    ggtitle(paste0("Gene: ", gene)) +
-    theme_bw() + 
-    theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
-    theme(axis.line = element_line(color = "black"))
-  return(p)
-}
-
-s <- fds$samples %>% filter(path_aoi %in% c("nl","lgd"))
-y <- log2_norm_cpm[, s$aoi]
-
-
-s <- fds$samples
-y <- log2_norm_cpm
-
-genes <- c("OLFM4", "MALL", "TNS4", "CLDN4", "DUOX2")
-
-w <- 5
-h <- 4
-
-
-g <- "PIKFYVE"
-
-x <- s %>% add_column(gene = y[g,])
-p <- ggplot(x, aes(x=cluster_name, y=gene, fill=cluster_name)) +
-  geom_boxplot(outlier.shape=NA, width=0.75) +
-  geom_point(aes(group=cluster_name),
-             position=position_jitterdodge(jitter.width=0.1))
-
-
-p <- ggplot(x, aes(x={{ aes_x }}, y=gene, fill={{aes_color}})) +
-  geom_boxplot(outlier.shape=NA, width=0.75) +
-  geom_point(position=position_jitterdodge(jitter.width=0.1), 
-             aes(group={{aes_color}}), pch=21) +
-  ggtitle(paste0("Gene: ", gene)) +
-  theme_bw() + 
-  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
-  theme(axis.line = element_line(color = "black"))
-return(p)
-  
-
-p <- plot_gene(s, y, "OLFM4", path_aoi, path_specimen) + 
-  scale_fill_manual(values=color_scales$path_aoi)
-
-
-for (g in genes) {
-  if (!(g %in% rownames(y))) { next }
-  p <- plot_gene(s, y, g, path_patient, path_patient) + 
-    scale_fill_manual(values=color_scales$path_patient)
-  f <- file.path(plot_dir, paste0("boxplot_gene_", g, ".pdf"))
-  ggsave(f, p, width=width, height=height)
-}
-
-#s <- s %>% filter(study == "ipmn")
-#y <- y[, s$aoi]
-genes <- c("CLU", "TNFAIP2", "MUC3A", "COL1A1", "MALL")
-for (g in genes) {
-  p <- plot_gene2(s, y, g, path_patient, path_patient) + 
-    scale_fill_manual(values=color_scales$path_patient)
-  f <- file.path(plot_dir, paste0("boxplot_gene_", g, ".pdf"))
-  ggsave(f, p, width=width, height=height)
-  p <- plot_gene2(s, y, g, patient, path_patient) + 
-    scale_fill_manual(values=color_scales$path_patient)
-  f <- file.path(plot_dir, paste0("boxplot_gene_by_patient_", g, ".pdf"))
-  ggsave(f, p, width=width, height=height)
-  p <- plot_gene2(s, y, g, patient_slide, path_patient) + 
-    scale_fill_manual(values=color_scales$path_patient)
-  f <- file.path(plot_dir, paste0("boxplot_gene_by_patient_slide_", g, ".pdf"))
-  ggsave(f, p, width=width, height=height)
-}
-
-
-```
-
-
-
-
-
-
-# GSEA plots
-
-## GSEA plots clusters CPTAC and HPA
-
-```{r gsea plots clusters}
-
-# CPTAC and HPA
-pathways <- c(names(gs_cptac), names(gs_hpa_panc))
-contrasts <- c("clusterHRvLR", "clusterHRvNL", "clusterLRvNL")
-
-gsea <- bind_rows(gsea_cptac, gsea_hpa_panc)
-gsea <- gsea %>%
-  filter(pathway %in% pathways, analysis %in% contrasts)
-gsea <- mutate(gsea, neglog10padj = ifelse(padj < gsea_padj_cutoff, -log10(padj), NA))
-gsea$analysis <- factor(gsea$analysis, levels=contrasts)
-
-p <- ggplot(gsea, aes(x=analysis, y=NES, fill=neglog10padj)) +
-  geom_col() + 
-  geom_hline(yintercept=0) +
-  scale_fill_viridis_c(limits=gsea_colormap_limits, option=gsea_viridis_colormap_option) +
-  theme_bw() + 
-  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
-  theme(strip.text = element_text(size=8)) +
-  facet_wrap(~ pathway, nrow=1) + 
-  labs(x="GSEA Analysis", y="Normalized Enrichment Score (NES)")
-f <- paste0("gsea_barplot_clusters_pdac")
-ggsave(file.path(plot_dir, paste0(f, ".pdf")), p, width=6, height=4)
-ggsave(file.path(plot_dir, paste0(f, ".png")), p, width=6, height=4)
-
-
-```
-
-
-## GSEA plots clusters Hallmark
-
-```{r gsea clusters hallmark}
-
-# Hallmark
-
-# all regions
-contrasts <- c("clusterHRvLR", "clusterHRvNL", "clusterLRvNL")
-
-gsea <- gsea_hallmark %>%
-  filter(analysis %in% contrasts)
-gsea <- mutate(gsea, pathway = gsub("HALLMARK_", "", pathway))
-gsea <- gsea %>% mutate(
-  neglog10padj = ifelse(padj < gsea_padj_cutoff, -log10(padj), NA),
-  sig = padj < gsea_padj_cutoff)
-
-# only keep significant results (at least one analysis)
-gsea <- gsea %>% group_by(pathway) %>%
-  filter(any(padj < gsea_padj_cutoff)) %>%
-  ungroup()
-
-# arrange by clusterHRvLR for readability
-gsea$pathway <- factor(gsea$pathway, levels=gsea %>% filter(analysis == "clusterHRvLR") %>% arrange(NES) %>% pull(pathway))
-
-p <- ggplot(gsea, aes(x=NES, y=pathway, fill=neglog10padj)) +
-  geom_col() + 
-  geom_hline(yintercept=0) +
-  scale_fill_viridis_c(limits=gsea_colormap_limits, option=gsea_viridis_colormap_option) +
-  xlim(-3, 3) +
-  theme_bw() + 
-  theme(axis.text.y = element_text(color="black", size=7)) +
-#  theme(axis.text.x = element_text(color="black", angle = 90, vjust = 0.5, hjust=1)) +
-  theme(strip.text = element_text(size=8)) +
-  facet_wrap(~ analysis, nrow=1) + 
-  labs(x="Normalized Enrichment Score (NES)", y="Pathway")
-
-f <- paste0("gsea_barplot_clusters_hallmark")
-ggsave(file.path(plot_dir, paste0(f, ".pdf")), p, width=8, height=4)
-ggsave(file.path(plot_dir, paste0(f, ".png")), p, width=8, height=4)
-
-
-```
-
-
-## GSEA plots clusters 3CA
-
-```{r gsea clusters 3CA}
-
-contrasts <- c("clusterHRvLR", "clusterHRvNL", "clusterLRvNL")
-
-gsea <- gsea_3ca %>%
-  filter(analysis %in% contrasts)
-gsea <- mutate(gsea, pathway = gsub("GAVISH_3CA_", "", pathway))
-gsea <- mutate(gsea, pathway = gsub("METAPROGRAM_", "", pathway))
-gsea <- gsea %>% mutate(
-  neglog10padj = ifelse(padj < gsea_padj_cutoff, -log10(padj), NA),
-  sig = padj < gsea_padj_cutoff)
-
-# only keep significant results (at least one analysis)
-gsea <- gsea %>% group_by(pathway) %>%
-  filter(any(padj < gsea_padj_cutoff)) %>%
-  ungroup()
-
-# arrange by clusterHR for readability
-gsea$pathway <- factor(gsea$pathway, levels=gsea %>% filter(analysis == "clusterHRvLR") %>% arrange(NES) %>% pull(pathway))
-
-p <- ggplot(gsea, aes(x=NES, y=pathway, fill=neglog10padj)) +
-  geom_col() + 
-  geom_hline(yintercept=0) +
-  scale_fill_viridis_c(limits=gsea_colormap_limits, option=gsea_viridis_colormap_option) +
-  theme_bw() + 
-  theme(axis.text.y = element_text(color="black", size=7)) +
-#  theme(axis.text.x = element_text(color="black", angle = 90, vjust = 0.5, hjust=1)) +
-  theme(strip.text = element_text(size=8)) +
-  facet_wrap(~ analysis, nrow=1) + 
-  labs(x="Normalized Enrichment Score (NES)", y="Pathway")
-
-f <- paste0("gsea_barplot_clusters_3ca")
-ggsave(file.path(plot_dir, paste0(f, ".pdf")), p, width=8, height=12)
-ggsave(file.path(plot_dir, paste0(f, ".png")), p, width=8, height=12)
-
-```
-
-
-## GSEA plots clusters pdacr
-
-```{r}
-
-contrasts <- c("clusterHRvLR", "clusterHRvNL", "clusterLRvNL")
-
-#
-# Moffitt (main figure)
-#
-pathways <- c("Moffitt.F6_BasalLike.top250", 
-              "Moffitt.F8_Classical.top250",
-              "Moffitt.F3_Exocrine.top250")
-
-gsea <- gsea_pdacr %>%
-  filter(analysis %in% contrasts, pathway %in% pathways)
-gsea <- mutate(gsea, neglog10padj = ifelse(padj < gsea_padj_cutoff, -log10(padj), NA))
-
-# arrange for readability
-gsea$pathway <- factor(gsea$pathway, levels=gsea %>% filter(analysis == "clusterHRvLR") %>% arrange(NES) %>% pull(pathway))
-gsea$analysis <- factor(gsea$analysis, levels=c("clusterLRvNL", "clusterHRvNL", "clusterHRvLR"))
-
-p <- ggplot(gsea, aes(x=analysis, y=NES, fill=neglog10padj)) +
-  geom_col() + 
-  geom_hline(yintercept=0) +
-  scale_fill_viridis_c(limits=gsea_colormap_limits, option=gsea_viridis_colormap_option) +
-  theme_bw() + 
-  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
-  theme(strip.text = element_text(size=8)) +
-  facet_wrap(~ pathway, nrow=1) + 
-  labs(x="GSEA Analysis", y="Normalized Enrichment Score (NES)")
-f <- paste0("gsea_barplot_clusters_moffitt")
-ggsave(file.path(plot_dir, paste0(f, ".pdf")), p, width=3, height=4)
-ggsave(file.path(plot_dir, paste0(f, ".png")), p, width=3, height=4)
-
-
-
-#
-# Other pathways (supplemental figure)
-#
-moffitt_pathways <- c("Moffitt.F6_BasalLike.top250", 
-                      "Moffitt.F8_Classical.top250",
-                      "Moffitt.F3_Exocrine.top250")
-collison_pathways <- c("Collisson.Classical", 
-                       "Collisson.Exocrine",
-                       "Collisson.QM")
-icgc_pathways <- c("ICGC.ADEX.Down", 
-                   "ICGC.ADEX.Up",
-                   "ICGC.Immunogenic.Down",
-                   "ICGC.Immunogenic.Up",
-                   "ICGC.Progenitor.Down",
-                   "ICGC.Progenitor.Up",
-                   "ICGC.Squamous.Down",
-                   "ICGC.Squamous.Up")
-chan_seng_yue_pathways <- c("Chan_Seng_Yue.BasalA", 
-                            "Chan_Seng_Yue.BasalB",
-                            "Chan_Seng_Yue.ClassicalA",
-                            "Chan_Seng_Yue.ClassicalB")
-pathways <- c(moffitt_pathways, collison_pathways, icgc_pathways, chan_seng_yue_pathways)
-
-gsea <- gsea_pdacr %>%
-  filter(analysis %in% contrasts, pathway %in% pathways)
-gsea <- mutate(gsea, neglog10padj = ifelse(padj < gsea_padj_cutoff, -log10(padj), NA))
-
-# add author
-gsea <- gsea %>% mutate(
-  author = case_when(pathway %in% moffitt_pathways ~ "Moffitt",
-                     pathway %in% collison_pathways ~ "Collison",
-                     pathway %in% icgc_pathways ~ "ICGC",
-                     pathway %in% chan_seng_yue_pathways ~ "Chan Seng Yue")
-)
-
-# arrange for readability
-gsea$pathway <- factor(gsea$pathway, levels=pathways)
-#gsea$pathway <- factor(gsea$pathway, levels=gsea %>% filter(analysis == "clusterHRvLR") %>% arrange(NES) %>% pull(pathway))
-gsea$analysis <- factor(gsea$analysis, levels=c("clusterLRvNL", "clusterHRvNL", "clusterHRvLR"))
-
-p <- ggplot(gsea, aes(x=analysis, y=NES, fill=neglog10padj)) +
-  geom_col() + 
-  geom_hline(yintercept=0) +
-  scale_fill_viridis_c(limits=gsea_colormap_limits, option=gsea_viridis_colormap_option) +
-  theme_bw() + 
-  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
-  theme(strip.text = element_text(size=8)) +
-  labs(x="GSEA Analysis", y="Normalized Enrichment Score (NES)") +
-  facet_wrap(author ~ pathway, nrow=1)
-f <- paste0("gsea_barplot_clusters_pdac_subtypes")
-ggsave(file.path(plot_dir, paste0(f, ".pdf")), p, width=16, height=5)
-ggsave(file.path(plot_dir, paste0(f, ".png")), p, width=16, height=5)
-
-
-```
-
-
-# GSEA subset analysis
-
-```{r gsea subsets}
-
-#
-# CPTAC GSEA
-#
-prefix <- "gsea_cptac"
-gs <- gs_cptac
-gsea <- run_batch_fgsea(analyses, de, gs, prefix, gsea_plot_dir, gsea_padj_cutoff, do_plots=FALSE)
-gsea_cptac <- as_tibble(gsea)
-# write gsea results
-f <- file.path(results_dir, paste0(prefix, "_results.tsv"))
-data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
-f <- file.path(results_dir, paste0(prefix, "_results.xlsx"))
-write_xlsx(gsea, f)
-
-
-#
-# HPA (TCGA) GSEA
-#
-prefix <- "gsea_hpa_panc"
-gs <- gs_hpa_panc
-gsea <- run_batch_fgsea(analyses, de, gs, prefix, gsea_plot_dir, gsea_padj_cutoff, do_plots=FALSE)
-gsea_hpa_panc <- as_tibble(gsea)
-# write gsea results
-f <- file.path(results_dir, paste0(prefix, "_results.tsv"))
-data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
-f <- file.path(results_dir, paste0(prefix, "_results.xlsx"))
-write_xlsx(gsea, f)
-
-#
-# PDAC subtypes GSEA
-#
-prefix <- "gsea_pdacr"
-gs <- gs_pdacr
-gsea <- run_batch_fgsea(analyses, de, gs, prefix, gsea_plot_dir, gsea_padj_cutoff, do_plots=FALSE)
-gsea_pdacr <- as_tibble(gsea)
-# write gsea results
-f <- file.path(results_dir, paste0(prefix, "_results.tsv"))
-data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
-f <- file.path(results_dir, paste0(prefix, "_results.xlsx"))
-write_xlsx(gsea, f)
-
-#
-# Hallmark gene set analysis
-#
-prefix <- "gsea_hallmark"
-gsea <- run_batch_fgsea(analyses, de, gs_hallmark, prefix, gsea_plot_dir, 
-                        gsea_padj_cutoff, do_plots=FALSE)
-gsea_hallmark <- as_tibble(gsea) %>%
-  left_join(select(msigdb_gene_sets, gs_cat, gs_name) %>% distinct(), 
-            by=c("pathway"="gs_name"))
-# write gsea results
-f <- file.path(results_dir, paste0(prefix, "_results.tsv"))
-data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
-f <- file.path(results_dir, paste0(prefix, "_results.xlsx"))
-write_xlsx(gsea, f)
-
-#
-# 3CA gene set analysis
-#
-prefix <- "gsea_3ca"
-gsea <- run_batch_fgsea(analyses, de, gs_3ca, prefix, gsea_plot_dir, 
-                        gsea_padj_cutoff, do_plots=FALSE)
-gsea_3ca <- as_tibble(gsea) %>%
-  left_join(select(msigdb_gene_sets, gs_cat, gs_name) %>% distinct(), 
-            by=c("pathway"="gs_name"))
-# write gsea results
-f <- file.path(results_dir, paste0(prefix, "_results.tsv"))
-data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
-f <- file.path(results_dir, paste0(prefix, "_results.xlsx"))
-write_xlsx(gsea, f)
-
-
-#
-# Gene Ontology analysis
-#
-prefix <- "gsea_gobp"
-gsea <- run_batch_fgsea(analyses, de, gs_gobp, prefix, gsea_plot_dir, 
-                        gsea_padj_cutoff, do_plots=FALSE)
-gsea_gobp <- as_tibble(gsea) %>%
-  left_join(select(msigdb_gene_sets, gs_cat, gs_name) %>% distinct(),
-            by=c("pathway"="gs_name"))
-# write gsea results
-f <- file.path(results_dir, paste0(prefix, "_results.tsv"))
-data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
-f <- file.path(results_dir, paste0(prefix, "_results.xlsx"))
-write_xlsx(gsea, f)
-
-
-```
-
-
-
-```{r nllgd plots}
-
-#
-# plots with just normal and lgd regions
-#
-alpha_aoi <- c("nl"=1, "lgd"=1, "hgd"=0.1, "inv"=0.1)
-p <- ggplot(x, aes(x=PC1, y=PC2, color=path_aoi, shape=path_specimen, alpha=path_aoi)) +
-  geom_point(size=3) +
-  scale_alpha_manual(values=alpha_aoi) +
-  scale_color_manual(values=color_scales$path_aoi) +
-  theme_bw() +
-  labs(x=pca_res.var_txt[1], y=pca_res.var_txt[2])
-f <- file.path(plot_dir, paste0("pca_path_aoi_nllgd.pdf"))
-ggsave(f, plot=p, device="pdf", width=width, height=height)
-
-p <- ggplot(x, aes(x=PC1, y=PC2, color=cluster_name, shape=path_specimen, alpha=path_aoi)) +
-  geom_point(size=3) +
-  scale_alpha_manual(values=alpha_aoi) +
-  scale_color_manual(values=color_scales$cluster_name) +
-  theme_bw() +
-  labs(x=pca_res.var_txt[1], y=pca_res.var_txt[2])
-f <- file.path(plot_dir, paste0("pca_path_cluster_nllgd.pdf"))
-ggsave(f, plot=p, device="pdf", width=width, height=height)
-
-
-
-```
-
-
-
-# Maitra NKX6-2 paper
-
-```{r maitra nkx6-2}
-
-
-y <- log2_norm_cpm
-s <- fds$samples
-s$patient <- factor(s$patient)
-s$patient_slide <- factor(paste0(s$patient, "_", s$slide))
-s$path_aoi <- factor(s$path_aoi, levels=c("nl", "adm", "panin", "lgd", "hgd", "inv", "pdac"))
-s$path_specimen <- factor(s$path_specimen, levels=c("nl", "ipmn_lgd", "ipmn_inv", "pnet", "pdac"))
-s$path_patient <- paste0(s$path_specimen, "_", s$path_aoi)
-s$path_patient <- factor(s$path_patient, 
-                         levels=c("nl_nl", "ipmn_lgd_nl", "ipmn_inv_nl", 
-                                  "pnet_nl", "pdac_nl", "nl_adm", "pdac_adm", 
-                                  "nl_panin", "pdac_panin", 
-                                  "ipmn_lgd_lgd", "ipmn_inv_lgd", 
-                                  "ipmn_inv_hgd", "ipmn_inv_inv", 
-                                  "pdac_pdac"))
-
-width = 8
-height = 5
-genes <- c("MUC5AC", "S100P", "SYTL2", "LRRTM4", "ST6GALNAC2", "TMEM67",
-           "EIF4A3", "CLDN18", "MSMB", 
-           "KRT17", "LAMB3", "LAMC2", "PNLIP", "AMY1A", "CLU",
-           "TNFAIP2", "MMP7", "MALL", "MUC6", "CEACAM5", "CEACAM1",
-           "PGC", "GALNT6", "CELA3A", "BPIFB1", "EPPK1", "PITX1", "LIF", 
-           "CTRB1", "NKX6-2", "OLFM4", "CD55", "POSTN", "RBP4", "POU5F1")
-#genes <- c("CD72", "DOK5", "ENO1", "POU2F2", "SUPT6H", "DNAJC17")
-for (g in genes) {
-  if (!(g %in% rownames(y))) { next }
-  p <- plot_gene(s, y, g, path_patient, path_patient) + 
-    scale_fill_manual(values=color_scales$path_patient)
-  f <- file.path(plot_dir, paste0("boxplot_gene_", g, ".pdf"))
-  ggsave(f, p, width=width, height=height)
-}
-
-#s <- s %>% filter(study == "ipmn")
-#y <- y[, s$aoi]
-genes <- c("CLU", "TNFAIP2", "MUC3A", "COL1A1", "MALL")
-for (g in genes) {
-  p <- plot_gene2(s, y, g, path_patient, path_patient) + 
-    scale_fill_manual(values=color_scales$path_patient)
-  f <- file.path(plot_dir, paste0("boxplot_gene_", g, ".pdf"))
-  ggsave(f, p, width=width, height=height)
-  p <- plot_gene2(s, y, g, patient, path_patient) + 
-    scale_fill_manual(values=color_scales$path_patient)
-  f <- file.path(plot_dir, paste0("boxplot_gene_by_patient_", g, ".pdf"))
-  ggsave(f, p, width=width, height=height)
-  p <- plot_gene2(s, y, g, patient_slide, path_patient) + 
-    scale_fill_manual(values=color_scales$path_patient)
-  f <- file.path(plot_dir, paste0("boxplot_gene_by_patient_slide_", g, ".pdf"))
-  ggsave(f, p, width=width, height=height)
-}
-
-
-
-
-```
-
-
-# GSVA (ssGSEA)
-
-```{r gsva analysis}
-
-
-for (i in 1:nrow(res)) {
-  gs_name = rownames(res)[i]
-  x <- s %>% add_column(gs_score = unlist(res[i,]))
-  p <- ggplot(x, aes(x=cluster, y=gs_score, fill=path)) +
-    geom_boxplot(outlier.shape=NA, width=0.75) +
-    geom_point(position=position_jitterdodge(jitter.width=0.1),
-               aes(group=path), pch=21, size=2, alpha=0.8) +
-    ggtitle(paste0("GSVA: ", gs_name)) +
-    theme_bw() + 
-    theme(axis.text.x = element_text(size=6, color="black", angle=90, vjust=0.5, hjust=1),
-          axis.line = element_line(color = "black")) +
-    scale_fill_manual(values = color_scale) + 
-    facet_grid(~ study, scale="free_x")
-  f <- file.path(plot_dir, paste0("gsva_boxplot_cluster_", gs_name))
-  ggsave(paste0(f, ".pdf"), p, width=12, height=6)
-  
-  p <- ggplot(x, aes(x=patient, y=gs_score, fill=path)) +
-    geom_boxplot(outlier.shape=NA, width=0.75) +
-    geom_point(position=position_jitterdodge(jitter.width=0.1),
-               aes(group=path), pch=21, size=2, alpha=0.8) +
-    ggtitle(paste0("GSVA: ", gs_name)) +
-    theme_bw() + 
-    theme(axis.text.x = element_text(size=6, color="black", angle=90, vjust=0.5, hjust=1),
-          axis.line = element_line(color = "black")) +
-    scale_fill_manual(values = color_scale) + 
-    facet_grid(~ study, scale="free_x")
-  f <- file.path(plot_dir, paste0("gsva_boxplot_patient_", gs_name))
-  ggsave(paste0(f, ".pdf"), p, width=12, height=6)
-
-  p <- ggplot(x, aes(x=fct_reorder(aoi, gs_score), y=gs_score, fill=path)) +
-    geom_col() +
-    ggtitle(paste0("GSVA: ", gs_name)) +
-    scale_fill_manual(values = color_scale) + 
-    facet_grid(~ patient, scale="free_x") +
-    theme_bw() + 
-    theme(axis.text.x = element_text(size=4, color="black", angle=90, vjust=0.5, hjust=1),
-          axis.line = element_line(color = "black")) +
-    theme(strip.text.x = element_text(angle = 90),
-          strip.clip = "off")
-  f <- file.path(plot_dir, paste0("gsva_aoi_", gs_name))
-  ggsave(paste0(f, ".pdf"), p, width=12, height=6)
-}
-
-
-
-
-
-
-x <- bind_cols(s, t(res))
-p <- ggplot(x, aes(x=fct_reorder(aoi, `Moffitt.F6_BasalLike.top100`))) +
-  geom_point(aes(y=`Moffitt.F6_BasalLike.top100`), fill="red", size=2, pch=21) +
-  geom_point(aes(y=`Moffitt.F8_Classical.top100`), fill="cyan", size=2, pch=22) +
-  geom_point(aes(y=`Moffitt.F3_Exocrine.top100`), fill="blue", size=2, pch=22) +
-  theme_bw() +
-  theme(axis.text.x = element_blank()) +
-  facet_grid(~ path, scales="free_x")
-
-
-
-p <- ggplot() +
-    geom_errorbar(data=data1, aes(x=.data$x, ymin=.data$q25+1, ymax=.data$q75+1, color=.data$keep), alpha=0.75) +
-    #geom_segment(data=data1, aes(x=x, xend=x, y=q25, yend=q75), color="grey", alpha=0.75) +
-    geom_point(data=data1, aes(x=.data$x, y=.data$bg_lod+1), color="black", shape=4, alpha=0.75) +
-    geom_point(data=data2, aes(x=.data$x, y=.data$value+1, fill=.data$quant), shape=21, alpha=0.75) +
-    scale_color_manual(values=pals::cols25()) +
-    scale_fill_viridis_d(option=viridis_colormap_option) +
-    scale_y_log10() +
-    theme_bw() +
-    theme(axis.text.x = element_blank(),
-          panel.grid.major.x = element_blank(),
-          panel.grid.minor.x = element_blank()) +
-    facet_grid(~ slide, scales="free_x") +
-    labs(x = "AOI", y="Gene Expression")
-  
-  
-
-  # quantiles
-  quantiles <- c(0.25, 0.5, 0.75, 0.90, 0.95, 0.99)
-  quant_names <- paste0("q", round(100 * quantiles))
-
-  q <- as_tibble(x) %>%
-    filter(!bg) %>%
-    reframe(across(everything(), ~ stats::quantile(.x, quantiles))) %>%
-    mutate(quant=quant_names) %>%
-    tidyr::pivot_longer(colnames(x), names_to="aoi", values_to="value") %>%
-    tidyr::pivot_wider(names_from="quant", values_from="value", names_prefix="") %>%
-    inner_join(s, by=c("aoi"="aoi"), suffix=c("_gene", "_aoi"))
-
-  data1 <- q %>%
-    rowwise() %>%
-    arrange(.data$keep, .data$q50) %>%
-    mutate(x=factor(.data$aoi, .data$aoi)) %>%
-    ungroup()
-
-  data2 <- data1 %>%
-    select("x", "slide", "keep", "q50", "q90", "q95", "q99") %>%
-    tidyr::pivot_longer(cols = c("q50", "q90", "q95", "q99"),
-                        names_to="quant", values_to="value")
-
-
-
-
-
-
-
-
-p <- ggplot(x, aes(x=cluster, y=`Moffitt.F6_BasalLike.top100`, fill=path)) +
-  geom_boxplot(outlier.shape=NA, width=0.75) + 
-  geom_point(position=position_jitterdodge(jitter.width=0.1),
-             aes(group=path), pch=21) +
-  scale_fill_manual(values = color_scales$path) + 
-  theme_bw() +
-  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
-  theme(axis.line = element_line(color = "black"))
-
-
-
-p <- ggplot(x, aes(x=cluster, y=`Moffitt.F8_Classical.top100`, fill=path)) +
-  geom_boxplot(outlier.shape=NA, width=0.75) + 
-  geom_point(position=position_jitterdodge(jitter.width=0.1),
-             aes(group=path), pch=21) +
-  scale_fill_manual(values = color_scales$path) + 
-  theme_bw() +
-  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
-  theme(axis.line = element_line(color = "black"))
-
-p <- ggplot(x, aes(x=cluster, y=`Moffitt.F3_Exocrine.top100`, fill=path)) +
-  geom_boxplot(outlier.shape=NA, width=0.75) + 
-  geom_point(position=position_jitterdodge(jitter.width=0.1),
-             aes(group=path), pch=21) +
-  scale_fill_manual(values = color_scales$path) + 
-  theme_bw() +
-  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1)) +
-  theme(axis.line = element_line(color = "black"))
-
-
-
-
-
-
-
-
-s <- fds$samples
-s$path <- gsub("_epithelial", "", s$path)
-s$path <- factor(s$path, levels=c("nl_nl", "pnet_nl", "ipmn_lgd_nl", 
-                                  "ipmn_inv_nl", "pdac_nl", 
-                                  "nl_adm", "nl_panin",
-                                  "ipmn_lgd_lgd", "ipmn_inv_lgd", "pdac_adm",
-                                  "pdac_panin", "ipmn_inv_hgd", "ipmn_inv_inv",
-                                  "pdac_pdac"),
-                 ordered=TRUE)
-
-color_scale <- color_scales$path
-names(color_scale) <- gsub("_epithelial", "", names(color_scale))
-
-
-for (i in 1:nrow(res)) {
-  gs_name = rownames(res)[i]
-  x <- s %>% add_column(gs_score = unlist(res[i,]))
-  p <- ggplot(x, aes(x=fct_reorder(patient, gs_score), y=gs_score, fill=path)) +
-    geom_boxplot(outlier.shape=NA, width=0.75) +
-    geom_point(position=position_jitterdodge(jitter.width=0.1),
-               aes(group=path), pch=21, size=2, alpha=0.8) +
-    ggtitle(paste0("GSVA: ", gs_name)) +
-    theme_bw() + 
-    theme(axis.text.x = element_text(size=6, color="black", angle=90, vjust=0.5, hjust=1),
-          axis.line = element_line(color = "black")) +
-    scale_fill_manual(values = color_scale) + 
-    facet_grid(~ study, scale="free_x")
-  f <- file.path(plot_dir, paste0("gsva_patient_", gs_name))
-  ggsave(paste0(f, ".pdf"), p, width=12, height=6)
-  
-  p <- ggplot(x, aes(x=fct_reorder(aoi, gs_score), y=gs_score, fill=path)) +
-    geom_col() +
-    ggtitle(paste0("GSVA: ", gs_name)) +
-    scale_fill_manual(values = color_scale) + 
-    facet_grid(~ patient, scale="free_x") +
-    theme_bw() + 
-    theme(axis.text.x = element_text(size=4, color="black", angle=90, vjust=0.5, hjust=1),
-          axis.line = element_line(color = "black")) +
-    theme(strip.text.x = element_text(angle = 90),
-          strip.clip = "off")
-  f <- file.path(plot_dir, paste0("gsva_aoi_", gs_name))
-  ggsave(paste0(f, ".pdf"), p, width=12, height=6)
-}
-
-
-
-# setup heatmap annotations
-annot_col <- column_to_rownames(fds$samples, "aoi") %>% 
-  select(study, patient, path_aoi, path_specimen) %>%
-  as.data.frame()
-
-
-
-# heatmap
-f <- file.path(plot_dir,  paste0("heatmap_gsva_pdac_subtypes"))
-h <- 6
-w <- 10
-
-p <- pheatmap(res,
-              color = colorRampPalette(c("navy", "white", "firebrick3"))(50),
-              breaks = seq(-2, 2, length.out=51),
-              border_color = NA,
-              scale="row",
-              cluster_rows = TRUE,
-              cluster_cols = TRUE,
-              clustering_distance_rows = "euclidean",
-              clustering_distance_cols = "euclidean",
-              clustering_method = "ward.D2",
-              annotation_col = annot_col,
-              annotation_colors = color_scales,
-              fontsize = 8,
-              fontsize_row = 8,
-              fontsize_col = 6,
-              filename = paste0(f, ".png"),
-              width = w,
-              height = h)
-save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
-
-
-```
-
-
-
-
-
-## GSVA / ssGSEA analysis
-
-```{r gsva analysis}
-library(GSVA)
-
-# Appreciate and cite code and signatures obtained from here:
-# https://github.com/PascaDiMagliano-Lab/Gift-of-Life-Public-Repository/blob/master/scripts/Spatial_Transcriptomics_Analysis/01_DGE_analysis.R
-
-## Collison geneset (https://pubmed.ncbi.nlm.nih.gov/21460848/)
-collison_gs <- list(
-  Collison_Exocrine_Like = c('REG1B','REG3A','REG1A','PNLIPRP2','CEL','PNLIP','PLA2G1B','CELA3A','CPB1','CELA3B','CTRB2','CLPS','CELA2B','PRSS2','PRSS1','GP2','SLC3A1','CFTR','SLC4A4','SPINK1'),
-  Collison_Basal = c('AIM2','FAM26F','GPM6B','S100A2','KRT14','CAV1','LOX','SLC2A3','TWIST1','PAPPA','NT5E','CKS2','HMMR','SLC5A3','PMAIP1','PHLDA1','SLC16A1','FERMT1','HK2','AHNAK2'),
-  Collison_Classical = c('TMEM45B','SDR16C5','GPRC5A','AGR2','S100P','FXYD3','ST6GALNAC1','CEACAM5','CEACAM6','TFF1','TFF3','CAPN8','FOXQ1','ELF3','ERBB3','TSPAN8','TOX3','LGALS4','PLS1','GPX2','ATP10B','MUC13'))
-
-## Moffit geneset (https://pubmed.ncbi.nlm.nih.gov/26343385/)
-moffit_gs <- list(
-  Moffit_Basal = c("VGLL1","UCA1","S100A2","LY6D","SPRR3","SPRR1B","LEMD1","KRT15","CTSL2","DHRS9","AREG","CST6","SERPINB3", "SERPINB4", "KRT6C", "KRT6A", "FAM83A", "SCEL", "FGFBP1", "KRT7", "KRT17", "GPR87", "TNS4", "SLC2A1", "ANXA8L2"),
-  Moffit_Classical = c("BTNL8","FAM3D","ATAD4","AGR3","CTSE","LOC400573","LYZ","TFF2","TFF1","ANXA10","LGALS4","PLA2G10", "CEACAM6","VSIG2","TSPAN8","ST6GALNAC1","AGR2","TFF3","CYP3A7","MYO1A","CLRN3","KRT20","CDH17","SPINK4","REG4")
-)
-
-## Bailey geneset (https://www.nature.com/articles/nature16965)
-bailey_gs <- list()
-bailey_gs[['Bailey_Basal']] <- c('PGAM1','ANGPTL4','ARPC2','ITGA3','PTPN1','GSDMC','DRAP1','ANXA8','LDHA','ARHGAP23','HCAR2','ULBP2','KIAA1609','PTHLH','CEBPB','SLC16A3','EGFR','PLXNA1','ZBED2','IL2A','TPD5212','DUSP14','FSCN1','RND3','GPR87','PANX1','S100A2','ANXA1','KRT6A','ADAM17','PTRF','EMLIN1','FBXL7','CERCAM','DDR2','GXYLT2','CHSY3','VSTM4','COL8A1','PRRX1','COL5A2','SPARC','FBN1','FAP','COL6A3','COL1A2','BNC2','EFEMP2','FSTL1','COL3A1','GSG2','KIF18A','CDCA5','CCNA2','MCM10','DEPDC1','UBE2C','KIF4A','CCNB1','KIF2C','SPAG5','TPX2','HIST1H2B0','BUB1','CKAP2L','PTTG1','CDC20','ERCC6L','NCAPG','NCAPH','PSMA7','CCT6A','CCT7','DKC1','HSPE1','EIF2S2','MRPL11','MRPL17','LYAR','PSMA1','EIF4A3','PPAT','HAT1','PAICS','BRIX1','RUVBL1','CKS1B','TOMM40','CCT5','ALYREF')
-bailey_gs[['Bailey_Classical']] <- c('LRRC66','GJB1','LGALS4','PLA2G10','PLS1','BCAS1','CAPN5','HNF4G','ARHGEF38','CAPN8','AP001187.9','ABP1','ERBB3','C9orf152','SLC44A4','IHH','HNF4A','FAM83E','PRR15L','EPS8L3')
-bailey_gs[['Bailey_ADEX']] <- c('REG3G','SYCN','REG1P','SERPINI2','CPB1','RP11-331F4.4','AQP8','RBPJL','CUZD1','PLA2G1B','CLPS','CEL','CELA3B','CELA3A','CTRB1','CTRC','CTRB2','PNLIPRP1','CPA1','CPA2','UNC79','GCK','GJD2','SYT4','KCNK16','NOL4','SCGN','INS','CABP7','CHGB','BEX1','SVOP','MR7-3HG','ABCC8','HMGCLL1','SLC30A8','SST','CELF3','PCSK2','SCG3')
-bailey_gs[['Bailey_Immunogenic']] <-  c('IGHV3-15','IGHV3-7','IGHV1-46','IGKV2-28','IGHV3-23','IGHV3-53','IGHV5-51','IGHA1','IGKV4-1','IGLV2-23','IGLV1-40','IGKV3-11','IGLL5','IGJ','IGLC3','IGKVLD-39','IGLV2-14','AC096579.7','IGKV3-20','IGKC','CSF1R','TYROBP','FCER1G','TLR8','C3AR1','CD86','WAS','SPI1','HAVCR2','SASH3','CYBB','MS4A4A','BTK','LAPTM5','PTPRC','MARCH1','CD53','AIF1','DOCK2','NCKAP1L','SIT1','GIMAP4','GPR174','SEPT1','CXCR6','ITK','TBC1D10C','GIMAP5','CD96','ZNF831','GZMK','PTPRCAP','SLAMF1','P2RY10','CD48','THEMIS','CD3E','CD3D','SH2D1A','CD2')
-
-## purist genes (genes that are used to compute purist score)
-purist_gs <- list(
-  PurIST_basal = c("GPR87", "KRT6A", "KRT17", "KRT15", "DCBLD2", "BCAR3", "PTGES", "ITGA3", "C16orf74", "S100A2", "KRT5"),
-  PurIST_classical = c("REG4", "ANXA10", "TFF1", "CDH17", "TSPAN8", "GATA6", "CLDN18", "LGALS4", "DDC", "SLC40A1", "CLRN3", "PLA2G10")
-)
-
-
-# filter genes measured by geomx platform
-subtypes_gs <- c(collison_gs, bailey_gs, moffit_gs)
-sapply(subtypes_gs, length)
-for (gs_name in names(subtypes_gs)) {
-  subtypes_gs[[gs_name]] <- intersect(subtypes_gs[[gs_name]], fds$meta$gene)
-}
-sapply(subtypes_gs, length)
-
-# GSVA
-y <- log2_norm_cpm
-res <- gsva(y, subtypes_gs, method="gsva")
-
-s <- fds$samples
-s$path <- gsub("_epithelial", "", s$path)
-s$path <- factor(s$path, levels=c("nl_nl", "pnet_nl", "ipmn_lgd_nl", 
-                                  "ipmn_inv_nl", "pdac_nl", 
-                                  "nl_adm", "nl_panin",
-                                  "ipmn_lgd_lgd", "ipmn_inv_lgd", "pdac_adm",
-                                  "pdac_panin", "ipmn_inv_hgd", "ipmn_inv_inv",
-                                  "pdac_pdac"),
-                 ordered=TRUE)
-
-color_scale <- color_scales$path
-names(color_scale) <- gsub("_epithelial", "", names(color_scale))
-
-
-for (i in 1:nrow(res)) {
-  gs_name = rownames(res)[i]
-  x <- s %>% add_column(gs_score = unlist(res[i,]))
-  p <- ggplot(x, aes(x=fct_reorder(patient, gs_score), y=gs_score, fill=path)) +
-    geom_boxplot(outlier.shape=NA, width=0.75) +
-    geom_point(position=position_jitterdodge(jitter.width=0.1),
-               aes(group=path), pch=21, size=2, alpha=0.8) +
-    ggtitle(paste0("GSVA: ", gs_name)) +
-    theme_bw() + 
-    theme(axis.text.x = element_text(size=6, color="black", angle=90, vjust=0.5, hjust=1),
-          axis.line = element_line(color = "black")) +
-    scale_fill_manual(values = color_scale) + 
-    facet_grid(~ study, scale="free_x")
-  f <- file.path(plot_dir, paste0("gsva_patient_", gs_name))
-  ggsave(paste0(f, ".pdf"), p, width=12, height=6)
-  
-  p <- ggplot(x, aes(x=fct_reorder(aoi, gs_score), y=gs_score, fill=path)) +
-    geom_col() +
-    ggtitle(paste0("GSVA: ", gs_name)) +
-    scale_fill_manual(values = color_scale) + 
-    facet_grid(~ patient, scale="free_x") +
-    theme_bw() + 
-    theme(axis.text.x = element_text(size=4, color="black", angle=90, vjust=0.5, hjust=1),
-          axis.line = element_line(color = "black")) +
-    theme(strip.text.x = element_text(angle = 90),
-          strip.clip = "off")
-  f <- file.path(plot_dir, paste0("gsva_aoi_", gs_name))
-  ggsave(paste0(f, ".pdf"), p, width=12, height=6)
-}
-
-
-
-# setup heatmap annotations
-annot_col <- column_to_rownames(fds$samples, "aoi") %>% 
-  select(study, patient, path_aoi, path_specimen) %>%
-  as.data.frame()
-
-
-
-# heatmap
-f <- file.path(plot_dir,  paste0("heatmap_gsva_pdac_subtypes"))
-h <- 6
-w <- 10
-
-p <- pheatmap(res,
-              color = colorRampPalette(c("navy", "white", "firebrick3"))(50),
-              breaks = seq(-2, 2, length.out=51),
-              border_color = NA,
-              scale="row",
-              cluster_rows = TRUE,
-              cluster_cols = TRUE,
-              clustering_distance_rows = "euclidean",
-              clustering_distance_cols = "euclidean",
-              clustering_method = "ward.D2",
-              annotation_col = annot_col,
-              annotation_colors = color_scales,
-              fontsize = 8,
-              fontsize_row = 8,
-              fontsize_col = 6,
-              filename = paste0(f, ".png"),
-              width = w,
-              height = h)
-save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
-
-
-```
-
-## PDAC purist score
-
-```{r purist score}
-
-calc_purist <- function(x, method="purist") {
-  
-  purist_baseline <- -6.815
-  purist_tbl <- tribble(
-    ~a, ~b, ~w,
-    "GPR87", "REG4", 1.994,
-    "KRT6A", "ANXA10", 2.031,
-    "BCAR3", "GATA6", 1.618,
-    "PTGES", "CLDN18", 0.922,
-    "ITGA3", "LGALS4", 1.059,
-    "C16orf74", "DDC", 0.929,
-    "S100A2", "SLC40A1", 2.505,
-    "KRT5", "CLRN3", 0.485
-  )
-  
-  puristn_baseline <- -12.414
-  puristn_tbl <- tribble(
-    ~a, ~b, ~w,
-    "GPR87", "REG4", 3.413,
-    "KRT6A", "ANXA10", 3.437,
-    "KRT17", "LGALS4", 2.078,
-    "S100A2", "TFF1", 2.651,
-    "C16orf74", "DDC", 0.901,
-    "KRT15", "PLA2G10", 2.677,
-    "PTGES", "CDH17", 2.911,
-    "DCBLD2", "TSPAN8", 1.903
-  )
-
-  if (method == "purist") {
-    tbl <- purist_tbl
-    baseline <- purist_baseline
-  } else {
-    tbl <- puristn_tbl
-    baseline <- puristn_baseline
-  }
-  
-  calc_score <- function(x) {
-    sum(tbl$w * as.integer(x[tbl$a] > x[tbl$b])) + baseline
-  }
-
-  scores <- apply(x, 2, calc_score)
-  probs <- exp(scores) / (1 + exp(scores))
-  subtypes <- if_else(scores > 0, "basal-like", "classical")
-  as_tibble(bind_cols(sample=colnames(x),
-                      score=scores, 
-                      prob=probs, 
-                      subtype=subtypes))
-}
-
-s <- fds$samples
-s$path <- gsub("_epithelial", "", s$path)
-s$path <- factor(s$path, levels=c("nl_nl", "pnet_nl", "ipmn_lgd_nl", 
-                                  "ipmn_inv_nl", "pdac_nl", 
-                                  "nl_adm", "nl_panin",
-                                  "ipmn_lgd_lgd", "ipmn_inv_lgd", "pdac_adm",
-                                  "pdac_panin", "ipmn_inv_hgd", "ipmn_inv_inv",
-                                  "pdac_pdac"),
-                 ordered=TRUE)
-
-color_scale <- color_scales$path
-names(color_scale) <- gsub("_epithelial", "", names(color_scale))
-
-y <- log2_norm_cpm
-purist <- calc_purist(log2_norm_cpm, method="puristn")
-x <- bind_cols(s, select(purist, purist_score=score, purist_prob=prob, purist_subtype=subtype))
-
-p <- ggplot(x, aes(x=fct_reorder(patient, purist_prob), y=purist_prob, fill=path)) +
-  geom_boxplot(outlier.shape=NA, width=0.75) +
-  geom_point(position=position_jitterdodge(jitter.width=0.1),
-             aes(group=path), pch=21, size=2, alpha=0.8) +
-  theme_bw() + 
-  theme(axis.text.x = element_text(size=6, color="black", angle=90, vjust=0.5, hjust=1),
-        axis.line = element_line(color = "black")) +
-  scale_fill_manual(values = color_scale) + 
-  facet_grid(~ study, scale="free_x") +
-  ggtitle("pdac purist score")
-f <- file.path(plot_dir, paste0("purist_patient"))
-ggsave(paste0(f, ".pdf"), p, width=12, height=6)
-
-p <- ggplot(x, aes(x=fct_reorder(aoi, purist_prob), y=purist_prob, fill=path)) +
-  geom_col() +
-  scale_fill_manual(values = color_scale) + 
-  facet_grid(~ patient, scale="free_x") +
-  theme_bw() + 
-  theme(axis.text.x = element_text(size=4, color="black", angle=90, vjust=0.5, hjust=1),
-        axis.line = element_line(color = "black")) +
-  theme(strip.text.x = element_text(angle = 90),
-        strip.clip = "off") +
-  ggtitle("pdac purist score")
-f <- file.path(plot_dir, paste0("purist_aoi"))
-ggsave(paste0(f, ".pdf"), p, width=12, height=6)
-
-
-
-```
-
-
-## Plot individual genes
-
-```{r plot individual genes}
-
-y <- log2_norm_cpm
-s <- fds$samples
-s$patient <- factor(s$patient)
-s$patient_slide <- factor(paste0(s$patient, "_", s$slide))
-s$path_aoi <- factor(s$path_aoi, levels=c("nl", "adm", "panin", "lgd", "hgd", "inv", "pdac"))
-s$path_specimen <- factor(s$path_specimen, levels=c("nl", "ipmn_lgd", "ipmn_inv", "pnet", "pdac"))
-s$path_patient <- paste0(s$path_specimen, "_", s$path_aoi)
-s$path_patient <- factor(s$path_patient, 
-                         levels=c("nl_nl", "ipmn_lgd_nl", "ipmn_inv_nl", 
-                                  "pnet_nl", "pdac_nl", "nl_adm", "pdac_adm", 
-                                  "nl_panin", "pdac_panin", 
-                                  "ipmn_lgd_lgd", "ipmn_inv_lgd", 
-                                  "ipmn_inv_hgd", "ipmn_inv_inv", 
-                                  "pdac_pdac"))
-
-width = 8
-height = 5
-genes <- c("MUC5AC", "S100P", "SYTL2", "LRRTM4", "ST6GALNAC2", "TMEM67",
-           "EIF4A3", "CLDN18", "MSMB", 
-           "KRT17", "LAMB3", "LAMC2", "PNLIP", "AMY1A", "CLU",
-           "TNFAIP2", "MMP7", "MALL", "MUC6", "CEACAM5", "CEACAM1",
-           "PGC", "GALNT6", "CELA3A", "BPIFB1", "EPPK1", "PITX1", "LIF", 
-           "CTRB1", "NKX6-2", "OLFM4", "CD55", "POSTN", "RBP4", "POU5F1")
-#genes <- c("CD72", "DOK5", "ENO1", "POU2F2", "SUPT6H", "DNAJC17")
-for (g in genes) {
-  if (!(g %in% rownames(y))) { next }
-  p <- plot_gene(s, y, g, path_patient, path_patient) + 
-    scale_fill_manual(values=color_scales$path_patient)
-  f <- file.path(plot_dir, paste0("boxplot_gene_", g, ".pdf"))
-  ggsave(f, p, width=width, height=height)
-}
-
-#s <- s %>% filter(study == "ipmn")
-#y <- y[, s$aoi]
-genes <- c("CLU", "TNFAIP2", "MUC3A", "COL1A1", "MALL")
-for (g in genes) {
-  p <- plot_gene2(s, y, g, path_patient, path_patient) + 
-    scale_fill_manual(values=color_scales$path_patient)
-  f <- file.path(plot_dir, paste0("boxplot_gene_", g, ".pdf"))
-  ggsave(f, p, width=width, height=height)
-  p <- plot_gene2(s, y, g, patient, path_patient) + 
-    scale_fill_manual(values=color_scales$path_patient)
-  f <- file.path(plot_dir, paste0("boxplot_gene_by_patient_", g, ".pdf"))
-  ggsave(f, p, width=width, height=height)
-  p <- plot_gene2(s, y, g, patient_slide, path_patient) + 
-    scale_fill_manual(values=color_scales$path_patient)
-  f <- file.path(plot_dir, paste0("boxplot_gene_by_patient_slide_", g, ".pdf"))
-  ggsave(f, p, width=width, height=height)
-}
-
-
-```
-
-# old LE analysis
-
-```{r le analysis old}
-
-
-gsea_leading_edge_matrix <- function(x, my_padj_cutoff=0.01, min_gene_sets=2) {
-  # get significant pathways
-  sig_pathways <- x %>%
-    filter(padj < my_padj_cutoff) %>% 
-    distinct(pathway) %>% 
-    pull()
-  # filter results for significant pathways
-  x <- x %>%
-    filter(pathway %in% sig_pathways) %>%
-    arrange(desc(NES))
-  sig_pathways <- factor(unique(x$pathway))
-  
-  # get leading edge genes
-  x <- x %>% unnest_longer(leadingEdge, values_to="gene")
-  leading_edge_genes <- x %>% 
-    count(gene) %>% 
-    filter(n >= min_gene_sets) %>% 
-    arrange(desc(n)) %>% 
-    distinct(gene) %>% 
-    pull()
-  leading_edge_genes <- factor(leading_edge_genes)
-  # filter results for leading edge genes
-  x <- x %>% filter(gene %in% leading_edge_genes)
-  
-  # table with genes (rows) vs pathways (columns)
-  x <- x %>% select(pathway, gene, NES) %>% 
-    pivot_wider(id_cols=gene, names_from=pathway, values_from=NES)
-  m <- x %>% column_to_rownames(var="gene")
-  m[is.na(m)] <- 0  
-
-  # filter empty columns
-  # m <- m[, abs(colSums(m)) > 1]
-  # order by number of pathways sharing the gene
-  #m <- m[order(rowSums(m), decreasing=TRUE),]
-  #m <- m[,order(colSums(m), decreasing=TRUE)]
-  return(m)
-}
-
-
-gsea_leading_edge_matrix2 <- function(x, my_padj_cutoff=0.01, min_gene_sets=2) {
-  # get significant pathways
-  sig_pathways <- x %>%
-    filter(padj < my_padj_cutoff) %>% 
-    distinct(pathway) %>% 
-    pull()
-  # filter results for significant pathways
-  x <- x %>%
-    filter(pathway %in% sig_pathways) %>%
-    arrange(desc(NES))
-  sig_pathways <- factor(unique(x$pathway))
-  
-  # get leading edge genes
-  x <- x %>% unnest_longer(leadingEdge, values_to="gene")
-
-  # genes must be in leading edge of all analyses (intersection)
-  # and enrichment in the same direction
-  num_analyses <- length(unique(x$analysis))
-  x <- x %>% group_by(gene, pathway) %>% 
-    filter(length(unique(sign(NES))) == 1, n() == num_analyses) %>%
-    ungroup() %>%
-    mutate(pathway = paste0(analysis, ".", pathway))  
-  
-  leading_edge_genes <- x %>% 
-    count(gene) %>% 
-    filter(n >= min_gene_sets) %>% 
-    arrange(desc(n)) %>% 
-    distinct(gene) %>% 
-    pull()
-  leading_edge_genes <- factor(leading_edge_genes)
-  # filter results for leading edge genes
-  x <- x %>% filter(gene %in% leading_edge_genes)
-  
-  # table with genes (rows) vs pathways (columns)
-  x <- x %>% select(pathway, gene, NES) %>% 
-    pivot_wider(id_cols=gene, names_from=pathway, values_from=NES)
-  m <- x %>% column_to_rownames(var="gene")
-  m[is.na(m)] <- 0  
-
-  # filter empty columns
-  # m <- m[, abs(colSums(m)) > 1]
-  # order by number of pathways sharing the gene
-  #m <- m[order(rowSums(m), decreasing=TRUE),]
-  #m <- m[,order(colSums(m), decreasing=TRUE)]
-  return(m)
-}
-
-
-gsea_leading_edge_matrix3 <- function(x, 
-                                      my_padj_cutoff=0.01, 
-                                      min_gene_sets=2,
-                                      min_analyses=2) {
-  # get significant pathways
-  sig_pathways <- x %>%
-    filter(padj < my_padj_cutoff) %>% 
-    distinct(pathway) %>% 
-    pull()
-  # filter results for significant pathways
-  x <- x %>%
-    filter(pathway %in% sig_pathways) %>%
-    arrange(desc(NES))
-  sig_pathways <- factor(unique(x$pathway))
-  # assign direction to enrichment score
-  x$nes_sign <- factor(sign(x$NES))
-
-  # get leading edge genes
-  x <- x %>% unnest_longer(leadingEdge, values_to="gene")
-
-  # genes must be in leading edge of at least 'min_analyses' analysis
-  # and enrichment in the same direction
-  x <- x %>% 
-    group_by(gene, pathway, nes_sign) %>% 
-    filter(n() >= min_analyses) %>%
-    ungroup() %>%
-    mutate(analysis_pathway = paste0(analysis, ".", pathway))  
-
-  leading_edge_genes <- x %>% 
-    group_by(analysis) %>%
-    count(gene) %>% 
-    filter(n >= min_gene_sets) %>% 
-    arrange(desc(n)) %>% 
-    distinct(gene) %>% 
-    pull()
-  leading_edge_genes <- factor(leading_edge_genes)
-  
-  # filter results for leading edge genes
-  x <- x %>% filter(gene %in% leading_edge_genes)
-  
-  # table with genes (rows) vs pathways (columns)
-  x <- x %>% select(analysis_pathway, gene, NES) %>% 
-    pivot_wider(id_cols=gene, names_from=analysis_pathway, values_from=NES)
-  m <- x %>% column_to_rownames(var="gene")
-  m[is.na(m)] <- 0
-  return(m)
-}
-
-padj_cutoff <- 0.01
-pathways <- c(
-  "Collisson.Exocrine",
-  "ICGC.ADEX.Up",
-  "Moffitt.F3_Exocrine.top250"
-)
-
-x <- filter(gsea_pdacr, analysis=="clusterHRvLR", pathway %in% pathways)
-m1 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
-colnames(m1) <- paste0("HRvLR_",colnames(m1))
-
-x <- filter(gsea_pdacr, analysis=="clusterHRvNL", pathway %in% pathways)
-m2 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
-colnames(m2) <- paste0("HRvNL_",colnames(m2))
-
-# combine matrices
-# select genes present in both analysis
-genes <- intersect(rownames(m1), rownames(m2))
-m1 <- m1[genes,]
-m2 <- m2[genes,]
-m <- cbind(m1, m2)
-
-p <- pheatmap(m, 
-              scale = "none",
-              color = colorRampPalette(c("blue", "white", "red"))(50),
-              breaks = seq(-1, 1, length.out=51),
-              cellwidth = 6,
-              cellheight = 6,
-              border_color = "black",
-              cluster_rows = TRUE,
-              cluster_cols = TRUE,
-              clustering_distance_rows = "euclidean",
-              clustering_distance_cols = "euclidean",
-              clustering_method = "ward.D2",
-              annotation_row = annot_row,
-              annotation_colors = color_scales,
-              fontsize_col = 4,
-              fontsize_row = 6)
-h <- 5
-w <- 5
-save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge_pdac_exocrine.pdf"), width=w, height=h)
-
-#
-# basal-like genes
-#
-padj_cutoff <- 0.05
-pathways <- c("Moffitt.F6_BasalLike.top250",
-              "Collisson.QM",
-              "ICGC.Squamous.Up",
-              "Chan_Seng_Yue.BasalA",
-              "Chan_Seng_Yue.BasalB")
-
-x <- filter(gsea_pdacr, analysis=="clusterHRvNL", pathway %in% pathways)
-m1 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
-colnames(m1) <- paste0("HRvNL_",colnames(m1))
-
-x <- filter(gsea_pdacr, analysis=="clusterHRvLR", pathway %in% pathways)
-m2 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
-colnames(m2) <- paste0("HRvLR_",colnames(m2))
-
-# combine matrices
-# select genes present in both analysis
-genes <- intersect(rownames(m1), rownames(m2))
-m1 <- m1[genes,]
-m2 <- m2[genes,]
-m <- cbind(m1, m2)
-
-# show intersection with CPTAC
-length(intersect(genes, gs_cptac$CPTAC_RNA_ALL_UP))
-length(intersect(genes, gs_cptac$CPTAC_PROT_ALL_UP))
-length(intersect(genes, gs_hpa_panc$HPA_PROGNOSIS_PANCREATIC_CANCER_UNFAV_ALL))
-# agreement across studies
-table(rowSums(sign(m)))
-
-
-
-p <- pheatmap(m, 
-              scale = "none",
-              color = colorRampPalette(c("blue", "white", "red"))(50),
-              breaks = seq(-1, 1, length.out=51),
-              cellwidth = 6,
-              cellheight = 6,
-              border_color = "black",
-              cluster_rows = TRUE,
-              cluster_cols = TRUE,
-              clustering_distance_rows = "euclidean",
-              clustering_distance_cols = "euclidean",
-              clustering_method = "ward.D2",
-              annotation_row = annot_row,
-              annotation_colors = color_scales,
-              fontsize_col = 4,
-              fontsize_row = 6)
-h <- 8
-w <- 6
-save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge_pdac_basal.pdf"), width=w, height=h)
-
-
-x <- filter(gsea_pdacr, analysis=="clusterHRvNL", pathway %in% pathways)
-m1 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
-colnames(m1) <- paste0("HRvNL_",colnames(m1))
-
-x <- filter(gsea_pdacr, analysis=="clusterLRvNL", pathway %in% pathways)
-m2 <- gsea_leading_edge_matrix(x, my_padj_cutoff=padj_cutoff, min_gene_sets=2)
-colnames(m2) <- paste0("LRvNL_",colnames(m2))
-
-# combine matrices
-# select genes present in both analysis
-genes <- intersect(rownames(m1), rownames(m2))
-m1 <- m1[genes,]
-m2 <- m2[genes,]
-m <- cbind(m1, m2)
-
-```
-
-
-# extra GSEA plots
-
-```{r gsea plots}
-
-gmt_to_tbl <- function(gmt) {
-  gs_to_tbl <- function(gs_name, gs_genes) {
-    bind_cols(gs_name = rep(gs_name, length(gs_genes)),
-              gene_symbol = gs_genes)
-  }
-  tbl <- NULL
-  for (i in 1:length(gmt)) {
-    tbl <- bind_rows(tbl, gs_to_tbl(names(gmt)[i], gmt[[i]]))
-  }
-  return(tbl)
-}
-
-plot_gsea_volcano <- function(x, padj_cutoff = 0.01, max.overlaps = Inf) {
-  p <- ggplot(x, aes(x=NES, y=-log10(padj), color=analysis)) + 
-    geom_point(data=subset(x, padj > padj_cutoff), size=1, alpha=0.4) + 
-    geom_point(data=subset(x, padj <= padj_cutoff), size=2, alpha=0.8) +
-    geom_text_repel(data=subset(x, padj <= padj_cutoff), color="black", size=3, aes(label=pathway), max.overlaps=max.overlaps) +
-    ylab("-log10(adjusted p-value)") +
-    xlab("NES") +
-    theme_minimal() +
-    theme(legend.position="bottom") + 
-    theme(axis.line = element_line(color = "black")) +
-    coord_flip() 
-  return(p)
-}
-
-plot_gsea_barplot <- function(x, padj_cutoff = 0.01) {
-  x <- mutate(x, sig = ifelse(padj < padj_cutoff, ifelse(NES < 0, "dn", "up"), "no"),
-              neglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA))
-  p <- ggplot(x, aes(x=reorder(pathway, NES), y=NES, fill=neglog10padj)) +
-    geom_col() +
-    scale_fill_gradient(low = "blue", high = "cyan", na.value="#aaaaaa") +
-    coord_flip() +
-    labs(x="Analysis", y="Normalized Enrichment Score") +
-    theme_minimal()
-  return(p)
-}
-
-
-
-#
-# pdacr plots
-#
-unique(gsea_pdacr$analysis)
-padj_cutoff <- 0.01
-plotanalyses <- unique(gsea_pdac$analysis)
-
-donor_analyses <- c("pdacpanin_vs_pdacnl", "pdacpdac_vs_pdacpanin",
-                   "pdacpdac_vs_pdacnl", "nlpanin_vs_nlnl",  "nladm_vs_nlnl", 
-                   "nlpanin_vs_nladm", "pdacpanin_vs_nlpanin", "pdacnl_vs_nlnl")
-ipmn_analyses <- c("invinv_vs_invnl", "invhgd_vs_invnl", "invlgd_vs_invnl", 
-                  "invinv_vs_invlgd", "invhgd_vs_invlgd", "invinv_vs_invhgd", 
-                  "lgdlgd_vs_lgdnl", "invinv_vs_lgdnl", "invhgd_vs_lgdnl", 
-                  "invlgd_vs_lgdnl", "invinv_vs_lgdlgd", "invhgd_vs_lgdlgd", 
-                  "invlgd_vs_lgdlgd", "invnl_vs_lgdnl")
-
-x <- filter(gsea_pdac, analysis %in% plotanalyses)
-x <- x %>% mutate( 
-  sig = ifelse(padj < padj_cutoff, ifelse(NES < 0, "dn", "up"), "no"),
-  neglog10padj = -log10(x$padj),
-  score = NES * -log10(x$padj),
-  fillneglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA),
-  fillnes = ifelse(padj < padj_cutoff, NES, NA)
-)
-
-x <- x %>% mutate(
-  pathway = factor(pathway),
-  analysis = fct_reorder(analysis, NES, .fun = function(x) { max(abs(x)) }),
-  facet = case_when(analysis %in% ipmn_analyses ~ "ipmn",
-                    analysis %in% donor_analyses ~ "donor_panc")
-)
-
-p <- ggplot(x, aes(x=analysis, y=NES, fill=fillneglog10padj)) +
-  geom_bar(stat="identity", position=position_dodge()) +
-  scale_fill_viridis_c(option=viridis_colormap_option) +
-  labs(x="Analysis", y="Normalized Enrichment Score",
-       title="GSEA PDAC DE genes") + 
-  theme_minimal() +
-  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1, size=6),
-        strip.clip = "off"
-  ) +
-  facet_grid(pathway ~ facet, scales = "free", space="free")
-p
-ggsave(file.path(plot_dir, "gsea_pdac_barplots.pdf"), p, width=8, height=10)
-
-
-
-#
-# GSEA hallmark bar plots
-#
-table(gsea_hallmark$analysis)
-x <- gsea_hallmark
-x$pathway <- gsub("HALLMARK_", "", x$pathway)
-
-padj_cutoff <- 0.01
-w <- 6
-h <- 6
-
-for (a in unique(x$analysis)) {
-  n <- nrow(filter(x, analysis == a, padj < padj_cutoff))
-  if (n == 0) { next }
-  p <- plot_gsea_barplot(filter(x, analysis == a), padj_cutoff = padj_cutoff) +
-    theme(axis.text.y = element_text(size=6))
-  f <- file.path(plot_dir, paste0("gsea_hallmark_", a, ".pdf"))
-  ggsave(f, plot=p, width=w, height=h)
-}
-
-
-#
-# GSEA GOBP
-#
-table(gsea_gobp$analysis)
-x <- gsea_gobp
-x$pathway <- gsub("GOBP_", "", x$pathway)
-
-padj_cutoff <- 0.01
-ntop <- 25
-w <- 10
-h <- 6
-
-# my_ggp + theme(axis.text.x = element_text(size = 20))
-
-for (a in unique(x$analysis)) {
-  res_up <- filter(x, analysis == a) %>%
-    slice_max(NES, n=ntop)
-  res_dn <- filter(x, analysis == a) %>%
-    slice_min(NES, n=ntop)
-  res <- bind_rows(res_up, res_dn) %>% distinct(pathway, .keep_all=TRUE)
-  n <- nrow(filter(res, padj < padj_cutoff))
-  if (n == 0) { next }
-  p <- plot_gsea_barplot(res, padj_cutoff = padj_cutoff) + 
-    theme(axis.text.y = element_text(size=6))
-  f <- file.path(plot_dir, paste0("gsea_gobp_", a, ".pdf"))
-  ggsave(f, plot=p, width=w, height=h)
-}
-
-
-#
-# cptac plots comparing analysis
-#
-unique(gsea_cptac$analysis)
-padj_cutoff <- 0.01
-plotanalyses <- unique(gsea_cptac$analysis)
-
-donor_analyses <- c("pdacpanin_vs_pdacnl", "pdacpdac_vs_pdacpanin",
-                   "pdacpdac_vs_pdacnl", "nlpanin_vs_nlnl",  "nladm_vs_nlnl", 
-                   "nlpanin_vs_nladm", "pdacpanin_vs_nlpanin", "pdacnl_vs_nlnl")
-ipmn_analyses <- c("invinv_vs_invnl", "invhgd_vs_invnl", "invlgd_vs_invnl", 
-                  "invinv_vs_invlgd", "invhgd_vs_invlgd", "invinv_vs_invhgd", 
-                  "lgdlgd_vs_lgdnl", "invinv_vs_lgdnl", "invhgd_vs_lgdnl", 
-                  "invlgd_vs_lgdnl", "invinv_vs_lgdlgd", "invhgd_vs_lgdlgd", 
-                  "invlgd_vs_lgdlgd", "invnl_vs_lgdnl")
-
-x <- filter(gsea_cptac, analysis %in% plotanalyses)
-x <- x %>% mutate( 
-  sig = ifelse(padj < padj_cutoff, ifelse(NES < 0, "dn", "up"), "no"),
-  neglog10padj = -log10(x$padj),
-  score = NES * -log10(x$padj),
-  fillneglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA),
-  fillnes = ifelse(padj < padj_cutoff, NES, NA)
-)
-
-x <- x %>% mutate(
-  pathway = factor(gsub("CPTAC_RNA_ALL_", "", pathway), levels=c("DN", "UP")), 
-  analysis = fct_reorder(analysis, NES, .fun = function(x) { max(abs(x)) }),
-  facet = case_when(analysis %in% ipmn_analyses ~ "ipmn",
-                    analysis %in% donor_analyses ~ "donor_panc")
-)
-
-p <- ggplot(x, aes(x=analysis, y=NES, fill=fillneglog10padj)) +
-  geom_bar(stat="identity", position=position_dodge()) +
-  scale_fill_viridis_c(option=viridis_colormap_option) +
-  labs(x="Analysis", y="Normalized Enrichment Score",
-       title="PDAC DE Genes (CPTAC RNA-Seq)") + 
-  theme_minimal() +
-  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1, size=6),
-        strip.clip = "off"
-  ) +
-  facet_grid(pathway ~ facet, scales = "free", space="free")
-p
-ggsave(file.path(plot_dir, "gsea_cptac_barplots.pdf"), p, width=12, height=5)
-
-
-#
-# pdac plots
-#
-unique(gsea_pdac$analysis)
-padj_cutoff <- 0.01
-plotanalyses <- unique(gsea_pdac$analysis)
-
-donor_analyses <- c("pdacpanin_vs_pdacnl", "pdacpdac_vs_pdacpanin",
-                   "pdacpdac_vs_pdacnl", "nlpanin_vs_nlnl",  "nladm_vs_nlnl", 
-                   "nlpanin_vs_nladm", "pdacpanin_vs_nlpanin", "pdacnl_vs_nlnl")
-ipmn_analyses <- c("invinv_vs_invnl", "invhgd_vs_invnl", "invlgd_vs_invnl", 
-                  "invinv_vs_invlgd", "invhgd_vs_invlgd", "invinv_vs_invhgd", 
-                  "lgdlgd_vs_lgdnl", "invinv_vs_lgdnl", "invhgd_vs_lgdnl", 
-                  "invlgd_vs_lgdnl", "invinv_vs_lgdlgd", "invhgd_vs_lgdlgd", 
-                  "invlgd_vs_lgdlgd", "invnl_vs_lgdnl")
-
-x <- filter(gsea_pdac, analysis %in% plotanalyses)
-x <- x %>% mutate( 
-  sig = ifelse(padj < padj_cutoff, ifelse(NES < 0, "dn", "up"), "no"),
-  neglog10padj = -log10(x$padj),
-  score = NES * -log10(x$padj),
-  fillneglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA),
-  fillnes = ifelse(padj < padj_cutoff, NES, NA)
-)
-
-x <- x %>% mutate(
-  pathway = factor(pathway),
-  analysis = fct_reorder(analysis, NES, .fun = function(x) { max(abs(x)) }),
-  facet = case_when(analysis %in% ipmn_analyses ~ "ipmn",
-                    analysis %in% donor_analyses ~ "donor_panc")
-)
-
-p <- ggplot(x, aes(x=analysis, y=NES, fill=fillneglog10padj)) +
-  geom_bar(stat="identity", position=position_dodge()) +
-  scale_fill_viridis_c(option=viridis_colormap_option) +
-  labs(x="Analysis", y="Normalized Enrichment Score",
-       title="GSEA PDAC DE genes") + 
-  theme_minimal() +
-  theme(axis.text.x = element_text(color = "black", angle = 90, vjust = 0.5, hjust=1, size=6),
-        strip.clip = "off"
-  ) +
-  facet_grid(pathway ~ facet, scales = "free", space="free")
-p
-ggsave(file.path(plot_dir, "gsea_pdac_barplots.pdf"), p, width=8, height=10)
-
-
-```
-
-
-# gsea clusters scatter plots
-
-```{r extra code}
-
-
-
-# categorize further
-x <- gsea_pdacr %>% mutate(
-  study = case_when(startsWith(pathway, "Moffitt") ~ "moffitt",
-                    startsWith(pathway, "Chan_Seng_Yue") ~ "chan_seng_yue",
-                    startsWith(pathway, "Collisson") ~ "collison",
-                    startsWith(pathway, "ICGC") ~ "icgc",
-                    TRUE ~ "other")
-)
-
-
-gsea <- x %>%
-  filter(analysis %in% contrasts, study != "other")
-gsea <- gsea %>% mutate(
-  neglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA),
-  sig = padj < padj_cutoff)
-
-# only keep significant results (at least one analysis)
-gsea <- gsea %>% group_by(pathway) %>%
-  filter(any(padj < padj_cutoff)) %>%
-  ungroup()
-
-# arrange by clusterHR for readability
-gsea$pathway <- factor(gsea$pathway, levels=gsea %>% filter(analysis == "clusterHRvLR") %>% arrange(NES) %>% pull(pathway))
-
-p <- ggplot(gsea, aes(x=pathway, y=NES, fill=neglog10padj)) +
-  geom_col() + 
-  geom_hline(yintercept=0) +
-  scale_fill_viridis_c(option=viridis_colormap_option) +
-  theme_bw() + 
-  theme(axis.text.x = element_text(color="black", angle = 90, vjust = 0.5, hjust=1)) +
-  theme(axis.text.y = element_text(color="black", size=7)) +
-  theme(strip.text = element_text(size=8)) +
-  facet_wrap(study ~ analysis) + 
-  labs(x="Pathway", y="Normalized Enrichment Score (NES)")
-
-
-f <- paste0("gsea_barplot_clusters_moffitt")
-ggsave(file.path(plot_dir, paste0(f, ".pdf")), p, width=3, height=5)
-ggsave(file.path(plot_dir, paste0(f, ".png")), p, width=3, height=5)
-
-
-
-# Hallmark
-contrasts <- c("cluster1v2", "cluster1v3", "cluster2v3")
-padj_cutoff <- 0.01
-
-gsea <- gsea_hallmark %>%
-  filter(analysis %in% contrasts)
-gsea <- mutate(gsea, pathway = gsub("HALLMARK_", "", pathway))
-gsea <- gsea %>% mutate(
-  neglog10padj = ifelse(padj < padj_cutoff, -log10(padj), NA),
-  sig = padj < padj_cutoff)
-
-# merge de analysis by gene
-gsea <- gsea %>% select(pathway, analysis, padj, neglog10padj, sig, ES, NES) %>%
-  pivot_wider(names_from = analysis, values_from = c(padj, neglog10padj, sig, ES, NES))
-
-#
-# scatter plot: c1 vs c2 (x) and c2 vs c3 (y)
-#
-label_data <- gsea %>% 
-  filter(!is.na(neglog10padj_cluster1v3) | !is.na(neglog10padj_cluster1v2))
-
-p <- ggplot(gsea, aes(x=NES_cluster1v2, y=NES_cluster1v3, 
-                      color=neglog10padj_cluster1v3, 
-                      fill=neglog10padj_cluster1v2)) +
-  geom_point(data=filter(gsea, sig_cluster1v3 | sig_cluster1v2), pch=21, size=3) + 
-  geom_point(data=filter(gsea, !(sig_cluster1v3 | sig_cluster1v2)), pch=21, size=1) +
-  geom_text_repel(data=label_data, aes(label=pathway), color="black", size=3, max.overlaps=Inf) +
-  scale_fill_viridis_c(option=viridis_colormap_option, limits=c(2,4), oob=scales::oob_squish) +
-  scale_color_viridis_c(option=viridis_colormap_option, limits=c(2,4), oob=scales::oob_squish) +
-  geom_vline(xintercept=0) +
-  geom_hline(yintercept=0) + 
-  xlim(-2.5, 2.5) + 
-  ylim(-2.5, 2.5)
-f <- paste0("gsea_scatter_cluster1_hallmark")
-ggsave(file.path(plot_dir, paste0(f, ".pdf")), p, width=10, height=8)
-ggsave(file.path(plot_dir, paste0(f, ".png")), p, width=10, height=8)
-
-
-
-#
-# scatter plot: c1 vs c2 (x) and c2 vs c3 (y)
-#
-label_data <- gsea %>% 
-  filter(!is.na(neglog10padj_cluster1v2) | !is.na(neglog10padj_cluster2v3))
-
-p <- ggplot(gsea, aes(x=NES_cluster1v2, y=NES_cluster2v3, 
-                      color=neglog10padj_cluster2v3, 
-                      fill=neglog10padj_cluster1v2)) +
-  geom_point(data=filter(gsea, sig_cluster2v3 | sig_cluster1v2), pch=21, size=3, stroke=2) + 
-  geom_point(data=filter(gsea, !(sig_cluster2v3 | sig_cluster1v2)), pch=21, size=1, stroke=1) +
-  geom_text_repel(data=label_data, aes(label=pathway), color="black", size=3) +
-  scale_fill_viridis_c(option=viridis_colormap_option, limits=c(2,4), oob=scales::oob_squish) +
-  scale_color_viridis_c(option=viridis_colormap_option, limits=c(2,4), oob=scales::oob_squish) +
-  geom_vline(xintercept=0) +
-  geom_hline(yintercept=0) + 
-  xlim(-2.5, 2.5) + 
-  ylim(-2.5, 2.5)
-f <- paste0("gsea_scatter_cluster2_hallmark")
-ggsave(file.path(plot_dir, paste0(f, ".pdf")), p, width=6, height=4)
-ggsave(file.path(plot_dir, paste0(f, ".png")), p, width=6, height=4)
-
-```
-
-
-# PDAC Purist score
-
-
-```{r purist score}
-
-calc_purist <- function(x, method="purist") {
-  
-  purist_baseline <- -6.815
-  purist_tbl <- tribble(
-    ~a, ~b, ~w,
-    "GPR87", "REG4", 1.994,
-    "KRT6A", "ANXA10", 2.031,
-    "BCAR3", "GATA6", 1.618,
-    "PTGES", "CLDN18", 0.922,
-    "ITGA3", "LGALS4", 1.059,
-    "C16orf74", "DDC", 0.929,
-    "S100A2", "SLC40A1", 2.505,
-    "KRT5", "CLRN3", 0.485
-  )
-  
-  puristn_baseline <- -12.414
-  puristn_tbl <- tribble(
-    ~a, ~b, ~w,
-    "GPR87", "REG4", 3.413,
-    "KRT6A", "ANXA10", 3.437,
-    "KRT17", "LGALS4", 2.078,
-    "S100A2", "TFF1", 2.651,
-    "C16orf74", "DDC", 0.901,
-    "KRT15", "PLA2G10", 2.677,
-    "PTGES", "CDH17", 2.911,
-    "DCBLD2", "TSPAN8", 1.903
-  )
-
-  if (method == "purist") {
-    tbl <- purist_tbl
-    baseline <- purist_baseline
-  } else {
-    tbl <- puristn_tbl
-    baseline <- puristn_baseline
-  }
-  
-  calc_score <- function(x) {
-    sum(tbl$w * as.integer(x[tbl$a] > x[tbl$b])) + baseline
-  }
-
-  scores <- apply(x, 2, calc_score)
-  probs <- exp(scores) / (1 + exp(scores))
-  subtypes <- if_else(scores > 0, "basal-like", "classical")
-  as_tibble(bind_cols(sample=colnames(x),
-                      score=scores, 
-                      prob=probs, 
-                      subtype=subtypes))
-}
-
-
-s <- fds$samples
-y <- log2_norm_cpm
-purist <- calc_purist(y, method="purist")
-puristn <- calc_purist(y, method="puristn")
-
-x <- bind_cols(
-  s, 
-  select(purist, purist_score=score, purist_prob=prob, purist_subtype=subtype),
-  select(puristn, puristn_score=score, puristn_prob=prob, puristn_subtype=subtype)
-)
-
-p <- ggplot(x, aes(x=fct_reorder(patient, purist_prob), y=purist_prob, fill=path_aoi)) +
-  geom_boxplot(outlier.shape=NA, width=0.75) +
-  geom_point(position=position_jitterdodge(jitter.width=0.1),
-             aes(group=path_aoi), pch=21, size=2, alpha=0.8) +
-  theme_bw() + 
-  theme(axis.text.x = element_text(size=6, color="black", angle=90, vjust=0.5, hjust=1),
-        axis.line = element_line(color = "black")) +
-  scale_fill_manual(values = color_scales$path_aoi)
-
-
-
-s <- fds$samples
-s$path <- gsub("_epithelial", "", s$path)
-s$path <- factor(s$path, levels=c("nl_nl", "pnet_nl", "ipmn_lgd_nl", 
-                                  "ipmn_inv_nl", "pdac_nl", 
-                                  "nl_adm", "nl_panin",
-                                  "ipmn_lgd_lgd", "ipmn_inv_lgd", "pdac_adm",
-                                  "pdac_panin", "ipmn_inv_hgd", "ipmn_inv_inv",
-                                  "pdac_pdac"),
-                 ordered=TRUE)
-
-color_scale <- color_scales$path
-names(color_scale) <- gsub("_epithelial", "", names(color_scale))
-
-y <- log2_norm_cpm
-purist <- calc_purist(log2_norm_cpm, method="puristn")
-x <- bind_cols(s, select(purist, purist_score=score, purist_prob=prob, purist_subtype=subtype))
-
-p <- ggplot(x, aes(x=fct_reorder(patient, purist_prob), y=purist_prob, fill=path)) +
-  geom_boxplot(outlier.shape=NA, width=0.75) +
-  geom_point(position=position_jitterdodge(jitter.width=0.1),
-             aes(group=path), pch=21, size=2, alpha=0.8) +
-  theme_bw() + 
-  theme(axis.text.x = element_text(size=6, color="black", angle=90, vjust=0.5, hjust=1),
-        axis.line = element_line(color = "black")) +
-  scale_fill_manual(values = color_scale) + 
-  facet_grid(~ study, scale="free_x") +
-  ggtitle("pdac purist score")
-f <- file.path(plot_dir, paste0("purist_patient"))
-ggsave(paste0(f, ".pdf"), p, width=12, height=6)
-
-p <- ggplot(x, aes(x=fct_reorder(aoi, purist_prob), y=purist_prob, fill=path)) +
-  geom_col() +
-  scale_fill_manual(values = color_scale) + 
-  facet_grid(~ patient, scale="free_x") +
-  theme_bw() + 
-  theme(axis.text.x = element_text(size=4, color="black", angle=90, vjust=0.5, hjust=1),
-        axis.line = element_line(color = "black")) +
-  theme(strip.text.x = element_text(angle = 90),
-        strip.clip = "off") +
-  ggtitle("pdac purist score")
-f <- file.path(plot_dir, paste0("purist_aoi"))
-ggsave(paste0(f, ".pdf"), p, width=12, height=6)
-
-
-
-```
-
 
