@@ -23,6 +23,7 @@ library(readxl)
 library(writexl)
 library(patchwork)
 library(ggrepel)
+library(ggridges)
 library(pROC)
 
 # bioinformatics packages
@@ -75,7 +76,7 @@ de_padj_cutoff <- 0.05
 de_log2fc_cutoff <- 1
 
 # gsea params
-gsea_nperms <- 100000
+gsea_nperms <- 10000
 gsea_padj_cutoff <- 0.01
 gsea_log2fc_cutoff <- 1
 
@@ -553,7 +554,6 @@ stgeomx_plot_gene_filter <- function(ds, min_frac_expr=0) {
   # density plot showing bg, undetectable (filtered), and detected (expressed)
   p1 <- ggplot(meta, aes(x=.data$frac_expr, y=.data$expressed, fill=.data$expressed)) +
     ggridges::geom_density_ridges(scale=5, alpha=0.5) +
-    #ggridges::geom_density_ridges(stat="binline", bins=50, scale=5, alpha=0.5) +
     geom_vline(xintercept = min_frac_expr, linetype="dashed", color="red") +
     scale_fill_manual(values = pals::cols25()) +
     ggridges::theme_ridges() +
@@ -2033,18 +2033,18 @@ fgsea_run_batch <- function(xde, xgs,
 gsea <- NULL
 
 # CPTAC
-res <- fgsea_run_batch(de, gs_cptac, fgsea_eps=0, fgsea_nperms=10000, fgsea_nproc=10)
+res <- fgsea_run_batch(de, gs_cptac, fgsea_eps=0, fgsea_nperms=gsea_nperms, fgsea_nproc=10)
 gsea <- bind_rows(gsea, res)
 # HPA
-res <- fgsea_run_batch(de, gs_hpa_panc, fgsea_eps=0, fgsea_nperms=10000, fgsea_nproc=10)
+res <- fgsea_run_batch(de, gs_hpa_panc, fgsea_eps=0, fgsea_nperms=gsea_nperms, fgsea_nproc=10)
 gsea <- bind_rows(gsea, res)
 # pdacr
 res <- fgsea_run_batch(de, gs_pdacr[pdacr_pathways], 
-                       fgsea_eps=0, fgsea_nperms=10000, fgsea_nproc=10)
+                       fgsea_eps=0, fgsea_nperms=gsea_nperms, fgsea_nproc=10)
 gsea <- bind_rows(gsea, res)
 # hallmark
 res <- fgsea_run_batch(de, gs_hallmark, 
-                       fgsea_eps=0, fgsea_nperms=10000, fgsea_nproc=10)
+                       fgsea_eps=0, fgsea_nperms=gsea_nperms, fgsea_nproc=10)
 gsea <- bind_rows(gsea, res)
 gsea_all <- gsea
 
@@ -2489,7 +2489,6 @@ save_pheatmap_pdf(p, filename=file.path(plot_dir, "gsea_leading_edge_hallmark.pd
 # hallmark pathways
 gene_sets <- c("H_TNFA_SIGNALING_VIA_NFKB", 
                "H_INTERFERON_GAMMA_RESPONSE",
-#               "H_INTERFERON_ALPHA_RESPONSE",
                "H_EPITHELIAL_MESENCHYMAL_TRANSITION")
 
 path_aoi_shapes = list(
@@ -2502,7 +2501,6 @@ path_aoi_shapes = list(
 hallmark_color_scales = list(
   "H_TNFA_SIGNALING_VIA_NFKB" = "#ff0000",
   "H_INTERFERON_GAMMA_RESPONSE" = "#ffff00",
-#  "H_INTERFERON_ALPHA_RESPONSE" = "#ffaa00",
   "H_EPITHELIAL_MESENCHYMAL_TRANSITION" = "#0022ff"
 )
 
@@ -3176,18 +3174,21 @@ save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
 gsea <- NULL
 
 # CPTAC
-res <- fgsea_run_batch(nllgd_de, gs_cptac, fgsea_eps=0, fgsea_nperms=10000, fgsea_nproc=10)
+res <- fgsea_run_batch(nllgd_de, gs_cptac, fgsea_eps=0, 
+                       fgsea_nperms=gsea_nperms, fgsea_nproc=10)
 gsea <- bind_rows(gsea, res)
 # HPA
-res <- fgsea_run_batch(nllgd_de, gs_hpa_panc, fgsea_eps=0, fgsea_nperms=10000, fgsea_nproc=10)
+res <- fgsea_run_batch(nllgd_de, gs_hpa_panc, fgsea_eps=0, 
+                       fgsea_nperms=gsea_nperms, fgsea_nproc=10)
 gsea <- bind_rows(gsea, res)
 # pdacr
 res <- fgsea_run_batch(nllgd_de, gs_pdacr[pdacr_pathways], 
-                       fgsea_eps=0, fgsea_nperms=10000, fgsea_nproc=10)
+                       fgsea_eps=0, 
+                       fgsea_nperms=gsea_nperms, fgsea_nproc=10)
 gsea <- bind_rows(gsea, res)
 # hallmark
-res <- fgsea_run_batch(nllgd_de, gs_hallmark, 
-                       fgsea_eps=0, fgsea_nperms=10000, fgsea_nproc=10)
+res <- fgsea_run_batch(nllgd_de, gs_hallmark, fgsea_eps=0, 
+                       fgsea_nperms=gsea_nperms, fgsea_nproc=10)
 gsea <- bind_rows(gsea, res)
 gsea_nllgd <- gsea
 
