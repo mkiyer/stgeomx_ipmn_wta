@@ -50,8 +50,9 @@ geomx_dir <- file.path(working_dir, "geomx")
 data_dir <- file.path(working_dir, "external_data")
 
 # ipmn dataset and annotations
-pja_ipmn_geomx_xlsx <- file.path(geomx_dir, "pja_ipmn_wta_2022-12-02.xlsx")
-pja_ipmn_geomx_annot_xlsx <- file.path(geomx_dir, "pja_ipmn_wta_annot_2023-05-03.xlsx")
+pja_ipmn_geomx_xlsx <- file.path(geomx_dir, "pja_ipmn_wta_submission_2024_05_29.xlsx")
+pja_ipmn_geomx_annot_xlsx <- file.path(geomx_dir, "pja_ipmn_wta_annot_submission_2023-05-29.xlsx")
+
 
 # external resource files
 hpa_path_file <- file.path(data_dir, "hpa_pathology.tsv")
