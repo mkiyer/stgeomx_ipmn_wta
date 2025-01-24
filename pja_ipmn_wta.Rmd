@@ -48,7 +48,7 @@ library(bluster)
 ```{r input files, include=FALSE}
 
 # set to location of manuscript files
-working_dir <- "/Users/mkiyer/University of Michigan Dropbox/Matthew Iyer/manuscripts/duke_stgeomx_ipmn_wta/resubmission/analysis"
+working_dir <- "/Users/mkiyer/University of Michigan Dropbox/MED-mctp-iyerlab/projects/stgeomx_ipmn_wta/final_submission/analysis"
 
 # input directories
 geomx_dir <- file.path(working_dir, "geomx")
@@ -58,8 +58,8 @@ data_dir <- file.path(working_dir, "external_data")
 wta_pkc_file <- file.path(geomx_dir, "Hs_R_NGS_WTA_v1.0.pkc")
 
 # ipmn dataset and annotations
-pja_ipmn_geomx_xlsx <- file.path(geomx_dir, "pja_ipmn_wta_resubmission_2024-08-05.xlsx")
-pja_ipmn_geomx_annot_xlsx <- file.path(geomx_dir, "pja_ipmn_wta_annot_resubmission_2024-08-08.xlsx")
+pja_ipmn_geomx_xlsx <- file.path(geomx_dir, "pja_ipmn_wta_geo_2024-09-18.xlsx")
+pja_ipmn_geomx_annot_xlsx <- file.path(geomx_dir, "pja_ipmn_wta_geo_annot_2024-09-18.xlsx")
 
 # Carbone IPMN WTA datasets
 cc_ipmn_geomx_dcc_tar <- file.path(geomx_dir, "GSE229752_RAW.tar")
@@ -160,6 +160,7 @@ color_scales = list(
 
 shape_scales <- list(
   study = c(duke=16, cc=15, soa=17, gol=18),
+  path_aoi = c(nl=15, lgd=16, hgd=17, inv=18),
   path_specimen = c(donor=15, 
                     ipmn_lg=17,
                     ipmn_ig=17,
@@ -174,7 +175,7 @@ shape_scales <- list(
 
 # Functions
 
-## functions stgeomx package
+## functions stgeomx
 
 ```{r stgeomx}
 
@@ -1048,6 +1049,7 @@ merge_ds <- function(a, b) {
 ## functions highly variable genes
 
 ```{r highly variable gene functions}
+
 
 get_var_tbl <- function(x, span=0.5) {
   tbl <- bind_cols(
@@ -2502,8 +2504,8 @@ chisq <- chisq.test(x)
 chisq
 
 # run trajectory analysis
-res <- slingshot(pca_tbl.traj, s$traj_clust_name, 
-                 start.clus="cNL", 
+res <- slingshot(pca_tbl.traj, s$traj_clust_name,
+                 start.clus="cNL",
                  end.clus="cPDAC")
 
 x <- slingAvgPseudotime(res)
@@ -2557,7 +2559,6 @@ ggsave(paste0(f, ".png"), plot=p, width=12, height=12)
 
 
 ```
-
 
 ## Differential expression
 
@@ -2756,7 +2757,7 @@ save_pheatmap_pdf(p, filename=paste0(f, ".pdf"), width=w, height=h)
 
 s <- fds_duke_panck$samples
 y <- fds_duke_panck$log2_norm_cpm
-feature_plot_genes <- c("CTRB1", "CRISP3", "TRIM29", "PGC")
+feature_plot_genes <- c("CTRB1", "CRISP3", "TRIM29", "PGC", "CLDN18", "KRT17", "CDH1")
 
 for (gene in feature_plot_genes) {
   print(gene)
@@ -3044,7 +3045,6 @@ s <- s %>% mutate(
   study = factor(study, levels=c("duke", "soa", "cc", "gol"))
 )
 
-
 w <- 5
 h <- 4
 genes <- c("PGC", "CTRB1", "MUC6", "NKX6-2", "TRIM29", "KRT17", "CRISP3", "ANPEP",
@@ -3053,6 +3053,35 @@ for (g in genes) {
   print(g)
   p <- plot_gene_boxplot(s, y, g)
   f <- file.path(plot_dir, paste0("gene_boxplot_", g))
+  ggsave(paste0(f, ".png"), p, width=w, height=h)
+  ggsave(paste0(f, ".pdf"), p, width=w, height=h)
+}
+
+
+#
+# immunofluorescence genes
+#
+w <- 3
+h <- 3
+s <- fds_panck$samples %>% filter(study == "duke")
+y <- fds_panck$log2_norm_cpm[, s$aoi]
+genes <- c("CLDN18", "KRT17", "CDH1")
+
+for (g in genes) {
+  print(g)
+  x <- bind_cols(s, gene=y[g,])
+  p <- ggplot(x, aes(x=cluster_name, y=gene)) +
+    geom_point(aes(color=patient, shape=path_aoi), 
+               position=position_jitter(width=0.1)) +
+    geom_boxplot(aes(fill=cluster_name), outlier.size=0, width=0.7, alpha=0.3) + 
+    scale_color_manual(values = color_scales$patient) +
+    scale_shape_manual(values = shape_scales$path_aoi) +
+    scale_fill_manual(values = color_scales$cluster_name) +
+    theme_minimal() +
+    theme(legend.title=element_text(size=8), 
+          legend.text=element_text(size=7)) +
+    labs(x="", y="log2 normalized expression", title=g)
+  f <- file.path(plot_dir, paste0("duke_if_gene_boxplot_", g))
   ggsave(paste0(f, ".png"), p, width=w, height=h)
   ggsave(paste0(f, ".pdf"), p, width=w, height=h)
 }
@@ -3194,6 +3223,12 @@ gsea <- gsea_all %>%
   group_by(contrast, pathway) %>%
   slice_min(padj, n=1, with_ties=FALSE) %>%
   ungroup()
+
+prefix <- "gsea_all_filtered"
+f <- file.path(results_dir, paste0(prefix, "_results.tsv"))
+data.table::fwrite(gsea, file=f, sep="\t", sep2=c("", " ", ""))
+f <- file.path(results_dir, paste0(prefix, "_results.xlsx"))
+write_xlsx(gsea, f)
 
          
 #
@@ -4715,6 +4750,15 @@ y <- gsea_nllgd %>%
 gsea <- bind_rows(x, y)
 
 
+# write gsea results
+prefix <- "gsea_nllgd_filtered"
+f <- file.path(results_dir, paste0(prefix, "_results.tsv"))
+data.table::fwrite(y, file=f, sep="\t", sep2=c("", " ", ""))
+f <- file.path(results_dir, paste0(prefix, "_results.xlsx"))
+write_xlsx(y, f)
+
+
+
 #
 # CPTAC and HPA
 #
@@ -5424,6 +5468,28 @@ f <- file.path(plot_dir, "duke_stroma_boxplot_gsva_moffitt_path_cluster")
 ggsave(paste0(f, ".pdf"), p, width=6, height=4)
 
 
+
+
+```
+
+
+# Write normalized data
+
+```{r write normalized data}
+
+s <- bind_cols(fds_duke_panck$samples, pca_tbl)
+s <- left_join(s, select(duke_ipmn_ds$samples, aoi, SegmentDisplayName),
+               by=join_by(aoi))
+
+x <- as_tibble(fds_duke_panck$x, rownames="gene")
+
+f <- file.path(results_dir, "duke_panck_norm_counts.xlsx")
+write_xlsx(list(aoi_metadata=s, norm_counts=x), f)
+
+s <- bind_cols(fds_duke_stroma$samples, pca_res.stroma$x[,1:2])
+x <- as_tibble(fds_duke_stroma$x, rownames="gene")
+f <- file.path(results_dir, "duke_stroma_norm_counts.xlsx")
+write_xlsx(list(aoi_metadata=s, norm_counts=x), f)
 
 
 ```
